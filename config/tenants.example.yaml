@@ -1,0 +1,93 @@
+# Contract example, not deployment configuration. Retention values are examples.
+schema_version: 1
+deployment: docker
+profile: development
+storage:
+  provider: seaweedfs
+  bindings:
+    mimir-blocks: &mimir-binding
+      protocol: s3
+      endpoint: https://seaweedfs:8333
+      region: local
+      bucket: nighthawk-mimir-blocks
+      force_path_style: true
+      tls:
+        enabled: true
+        ca_secret_ref: storage-ca
+      identity:
+        type: secret
+        ref: mimir-storage
+      capabilities:
+        versioning: false
+        lifecycle: false
+        workload_identity: false
+    mimir-ruler:
+      <<: *mimir-binding
+      bucket: nighthawk-mimir-ruler
+    mimir-alertmanager:
+      <<: *mimir-binding
+      bucket: nighthawk-mimir-alertmanager
+    loki-chunks:
+      <<: *mimir-binding
+      bucket: nighthawk-loki-chunks
+      identity:
+        type: secret
+        ref: loki-storage
+    tempo-traces:
+      <<: *mimir-binding
+      bucket: nighthawk-tempo-traces
+      identity:
+        type: secret
+        ref: tempo-storage
+    pyroscope-profiles:
+      <<: *mimir-binding
+      bucket: nighthawk-pyroscope-profiles
+      identity:
+        type: secret
+        ref: pyroscope-storage
+secrets:
+  storage-ca: {file: secrets/local.sops.yaml, key: storage-ca}
+  mimir-storage: {file: secrets/local.sops.yaml, key: mimir-storage}
+  loki-storage: {file: secrets/local.sops.yaml, key: loki-storage}
+  tempo-storage: {file: secrets/local.sops.yaml, key: tempo-storage}
+  pyroscope-storage: {file: secrets/local.sops.yaml, key: pyroscope-storage}
+  example-ingest: {file: secrets/local.sops.yaml, key: example-ingest}
+  example-query: {file: secrets/local.sops.yaml, key: example-query}
+credentials:
+  - id: example-ingest
+    secret_ref: example-ingest
+    tenant: example
+    datastream: application
+    permission: ingest
+    certificate_identity: spiffe://nighthawk/example/application/collector
+  - id: example-query
+    secret_ref: example-query
+    tenant: example
+    datastream: application
+    permission: query
+tenants:
+  - id: example
+    datastreams:
+      - id: application
+        backend_id: example-application
+        signals:
+          metrics:
+            retention: 168h
+            ingestion_rate_bytes_per_second: 1048576
+            query_concurrency: 4
+          logs:
+            retention: 72h
+            ingestion_rate_bytes_per_second: 1048576
+            query_concurrency: 4
+          traces:
+            retention: 72h
+            ingestion_rate_bytes_per_second: 1048576
+            query_concurrency: 4
+          profiles:
+            retention: 168h
+            ingestion_rate_bytes_per_second: 1048576
+            query_concurrency: 4
+        collection:
+          approved: true
+          drop_fields: [password, authorization, cookie, email]
+          allow_privileged_profiling: false

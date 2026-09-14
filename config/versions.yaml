@@ -1,0 +1,30 @@
+# Source-verified candidates, not a complete deployment/image-digest lock.
+schema_version: 1
+runtime_verified: false
+backends:
+  mimir:
+    version: 3.2.1
+    compose_architecture: classic
+    production_architecture: ingest-storage
+  tempo:
+    version: 3.0.3
+    compose_architecture: monolithic
+    production_architecture: distributed-kafka
+  pyroscope:
+    version: 2.3.1
+    storage: v2
+    retention_override: retention_period
+object_storage:
+  provider: seaweedfs
+  version: "4.47"
+  chart_version: 4.47.0
+validation_tools:
+  terraform:
+    version: 1.13.5
+    sha256:
+      windows_amd64: 73f97943c93f268ae2c645b2a737d552175aa64d00a5c8b8f5ccc5831c033c8a
+      linux_amd64: 0dbe3fcc268eb670801af6a6456799d1ae26e72e73797f6c6167e18aafd1fd9a
+      linux_arm64: fc1ddcb403fb57e25bdbdceb1ef2b1a102650c01b4d65dd3410082d2ef8b4417
+  aws_provider:
+    source: hashicorp/aws
+    version: 6.12.0

@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:nighthawk:platform:1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "deployment", "profile", "storage", "secrets", "credentials", "tenants"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "deployment": {"enum": ["docker", "self-hosted-k8s", "aws"]},
+    "profile": {"enum": ["development", "production"]},
+    "storage": {"$ref": "#/$defs/storage"},
+    "secrets": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"$ref": "#/$defs/id"},
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file", "key"],
+        "properties": {
+          "file": {"type": "string", "pattern": "^secrets/[a-zA-Z0-9_-]+\\.sops\\.(yaml|json)$"},
+          "key": {"type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9_-]*$"}
+        }
+      }
+    },
+    "credentials": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "secret_ref", "tenant", "datastream", "permission"],
+        "properties": {
+          "id": {"$ref": "#/$defs/id"},
+          "secret_ref": {"$ref": "#/$defs/id"},
+          "tenant": {"$ref": "#/$defs/id"},
+          "datastream": {"$ref": "#/$defs/id"},
+          "permission": {"enum": ["ingest", "query"]},
+          "certificate_identity": {"type": "string", "pattern": "^spiffe://nighthawk/[a-z][a-z0-9-]*/[a-z][a-z0-9-]*/[a-z][a-z0-9-]*$"}
+        }
+      }
+    },
+    "tenants": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "datastreams"],
+        "properties": {
+          "id": {"$ref": "#/$defs/id"},
+          "datastreams": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "backend_id", "signals", "collection"],
+              "properties": {
+                "id": {"$ref": "#/$defs/id"},
+                "backend_id": {"$ref": "#/$defs/id"},
+                "signals": {
+                  "type": "object",
+                  "minProperties": 1,
+                  "additionalProperties": false,
+                  "properties": {
+                    "metrics": {"$ref": "#/$defs/signal"},
+                    "logs": {"$ref": "#/$defs/signal"},
+                    "traces": {"$ref": "#/$defs/signal"},
+                    "profiles": {"$ref": "#/$defs/signal"}
+                  }
+                },
+                "collection": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["approved", "drop_fields", "allow_privileged_profiling"],
+                  "properties": {
+                    "approved": {"const": true},
+                    "drop_fields": {
+                      "type": "array",
+                      "minItems": 1,
+                      "uniqueItems": true,
+                      "items": {"type": "string", "minLength": 1}
+                    },
+                    "allow_privileged_profiling": {"type": "boolean"}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}$"},
+    "signal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["retention", "ingestion_rate_bytes_per_second", "query_concurrency"],
+      "properties": {
+        "retention": {"type": "string", "maxLength": 8, "pattern": "^[1-9][0-9]*h$"},
+        "ingestion_rate_bytes_per_second": {"type": "integer", "minimum": 1},
+        "query_concurrency": {"type": "integer", "minimum": 1}
+      }
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "bindings"],
+      "properties": {
+        "provider": {"enum": ["seaweedfs", "aws"]},
+        "bindings": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {"enum": ["mimir-blocks", "mimir-ruler", "mimir-alertmanager", "loki-chunks", "loki-ruler", "tempo-traces", "pyroscope-profiles"]},
+          "additionalProperties": {"$ref": "#/$defs/binding"}
+        }
+      }
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol", "endpoint", "region", "bucket", "force_path_style", "tls", "identity", "capabilities"],
+      "properties": {
+        "protocol": {"const": "s3"},
+        "endpoint": {"type": "string", "minLength": 1},
+        "region": {"type": "string", "pattern": "^[a-z0-9-]+$"},
+        "bucket": {"type": "string", "pattern": "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"},
+        "force_path_style": {"type": "boolean"},
+        "tls": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "ca_secret_ref"],
+          "properties": {
+            "enabled": {"const": true},
+            "ca_secret_ref": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/id"}]}
+          }
+        },
+        "identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "ref"],
+          "properties": {
+            "type": {"enum": ["secret", "irsa"]},
+            "ref": {"type": "string", "minLength": 1}
+          }
+        },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["versioning", "lifecycle", "workload_identity"],
+          "properties": {
+            "versioning": {"type": "boolean"},
+            "lifecycle": {"type": "boolean"},
+            "workload_identity": {"type": "boolean"}
+          }
+        }
+      }
+    }
+  }
+}
