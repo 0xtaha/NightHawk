@@ -1,0 +1,5 @@
+bucket         = "replace-with-bootstrapped-state-bucket"
+key            = "nighthawk/aws/terraform.tfstate"
+region         = "eu-west-1"
+encrypt        = true
+dynamodb_table = "replace-with-bootstrapped-lock-table"

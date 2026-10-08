@@ -2,12 +2,19 @@
 
 This independently managed root provisions telemetry storage through the
 cloud object-storage facade. It is not a complete EKS environment or a
-state-bootstrap root.
+state-bootstrap root; see
+[`aws-state-bootstrap`](../aws-state-bootstrap/README.md) for the remote
+state backend this root's `backend.hcl` points at, and
+[`aws`](../aws/README.md) for the VPC/EKS/OIDC compute root that supplies
+this root's `aws_identity` input.
 
 ## Prerequisites
 
-Use Terraform 1.13.5, the included provider lock, an existing EKS/OIDC provider,
-and separately bootstrapped encrypted S3 state plus DynamoDB locking.
+Use Terraform 1.13.5, the included provider lock, an existing EKS/OIDC provider
+(apply [`aws`](../aws/README.md) first and copy its `oidc_provider_arn`/
+`oidc_issuer_url` outputs into `aws_identity`), and separately bootstrapped
+encrypted S3 state plus DynamoDB locking (apply
+[`aws-state-bootstrap`](../aws-state-bootstrap/README.md) first).
 The AWS account/region, globally unique prefix, service accounts, version policy,
 and provisioning credentials must be supplied by the operator.
 

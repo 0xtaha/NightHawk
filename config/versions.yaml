@@ -1,23 +1,107 @@
-# Source-verified candidates, not a complete deployment/image-digest lock.
+# Source-verified compatibility matrix for every component the Docker,
+# self-hosted Kubernetes, and AWS deployment profiles depend on.
+# Not a complete deployment/image-digest lock; see versions.schema.json.
 schema_version: 1
-runtime_verified: false
 backends:
   mimir:
     version: 3.2.1
+    source: https://github.com/grafana/mimir/releases/tag/mimir-3.2.1
+    runtime_verified: false
     compose_architecture: classic
     production_architecture: ingest-storage
+  loki:
+    version: 3.7.8
+    source: https://github.com/grafana/loki/releases/tag/v3.7.8
+    runtime_verified: false
   tempo:
     version: 3.0.3
+    source: https://github.com/grafana/tempo/releases/tag/v3.0.3
+    runtime_verified: false
     compose_architecture: monolithic
     production_architecture: distributed-kafka
   pyroscope:
     version: 2.3.1
+    source: https://github.com/grafana/pyroscope/releases/tag/v2.3.1
+    runtime_verified: false
     storage: v2
     retention_override: retention_period
 object_storage:
   provider: seaweedfs
   version: "4.47"
+  source: https://github.com/seaweedfs/seaweedfs/releases/tag/4.47
   chart_version: 4.47.0
+  chart_source: https://artifacthub.io/packages/helm/seaweedfs/seaweedfs
+  runtime_verified: false
+kubernetes_platform:
+  k3s:
+    version: 1.37.1+k3s1
+    source: https://github.com/k3s-io/k3s/releases/tag/v1.37.1%2Bk3s1
+    runtime_verified: false
+  cilium:
+    version: 1.20.2
+    source: https://github.com/cilium/cilium/releases/tag/v1.20.2
+    runtime_verified: false
+  metallb:
+    version: 0.16.1
+    source: https://artifacthub.io/packages/helm/metallb/metallb
+    runtime_verified: false
+  longhorn:
+    version: 1.13.0
+    source: https://github.com/longhorn/longhorn/releases/tag/v1.13.0
+    runtime_verified: false
+  traefik:
+    version: 3.7.13
+    source: https://artifacthub.io/packages/helm/traefik/traefik
+    runtime_verified: false
+  cert_manager:
+    version: 1.21.2
+    source: https://github.com/cert-manager/cert-manager/releases/tag/v1.21.2
+    runtime_verified: false
+  strimzi:
+    version: 1.2.0
+    source: https://github.com/strimzi/strimzi-kafka-operator/releases/tag/1.2.0
+    runtime_verified: false
+    kafka_version: 4.3.1
+    kafka_source: https://raw.githubusercontent.com/strimzi/strimzi-kafka-operator/1.2.0/kafka-versions.yaml
+  eks:
+    version: "1.37"
+    source: https://docs.aws.amazon.com/eks/latest/userguide/kubernetes-versions-standard.html
+    runtime_verified: false
+  ebs_csi_driver:
+    version: 1.66.0
+    source: https://github.com/kubernetes-sigs/aws-ebs-csi-driver/releases/tag/v1.66.0
+    runtime_verified: false
+grafana_charts:
+  grafana:
+    version: 13.3.1
+    app_version: 13.2.3
+    source: https://artifacthub.io/packages/helm/grafana-community/grafana
+    runtime_verified: false
+  loki:
+    version: 18.14.0
+    app_version: 3.7.8
+    source: https://artifacthub.io/packages/helm/grafana-community/loki
+    runtime_verified: false
+  tempo_distributed:
+    version: 3.11.1
+    app_version: 3.1.0
+    source: https://artifacthub.io/packages/helm/grafana-community/tempo-distributed
+    runtime_verified: false
+  mimir_distributed:
+    version: 6.3.0-weekly.415
+    app_version: r415-a8adae14
+    source: https://artifacthub.io/packages/helm/grafana/mimir-distributed
+    runtime_verified: false
+    # mimir-distributed has not migrated to grafana-community/helm-charts and
+    # currently only publishes weekly pre-release chart versions; no stable
+    # tagged release exists as of this pin. Re-verify before promoting
+    # runtime_verified, same caveat pattern as the Pyroscope v1/v2 note.
+    release_channel: weekly
+  pyroscope:
+    version: 2.3.1
+    app_version: 2.3.1
+    source: https://artifacthub.io/packages/helm/grafana/pyroscope
+    runtime_verified: false
 validation_tools:
   terraform:
     version: 1.13.5
@@ -28,3 +112,79 @@ validation_tools:
   aws_provider:
     source: hashicorp/aws
     version: 6.12.0
+secrets_tools:
+  sops:
+    version: 3.13.3
+    source: https://github.com/getsops/sops/releases/tag/v3.13.3
+    runtime_verified: false
+  age:
+    version: 1.3.2
+    source: https://github.com/FiloSottile/age/releases/tag/v1.3.2
+    runtime_verified: false
+os_support:
+  docker_hosts:
+    - distribution: ubuntu
+      versions: ["22.04", "24.04"]
+      architectures: ["amd64", "arm64"]
+    - distribution: debian
+      versions: ["12"]
+      architectures: ["amd64", "arm64"]
+  k3s_nodes:
+    - distribution: ubuntu
+      versions: ["22.04", "24.04"]
+      architectures: ["amd64", "arm64"]
+tracked_consumers:
+  - path: terraform/modules/object-storage/versions.tf
+    pattern: 'required_version\s*=\s*"=\s*([0-9.]+)"'
+    component: validation_tools.terraform.version
+  - path: terraform/modules/object-storage/versions.tf
+    pattern: '(?m)^\s*version\s*=\s*"=\s*([0-9.]+)"'
+    component: validation_tools.aws_provider.version
+  - path: terraform/modules/aws-s3-backends/versions.tf
+    pattern: 'required_version\s*=\s*"=\s*([0-9.]+)"'
+    component: validation_tools.terraform.version
+  - path: terraform/modules/aws-s3-backends/versions.tf
+    pattern: '(?m)^\s*version\s*=\s*"=\s*([0-9.]+)"'
+    component: validation_tools.aws_provider.version
+  - path: terraform/environments/aws-state-bootstrap/versions.tf
+    pattern: 'required_version\s*=\s*"=\s*([0-9.]+)"'
+    component: validation_tools.terraform.version
+  - path: terraform/environments/aws-state-bootstrap/versions.tf
+    pattern: '(?m)^\s*version\s*=\s*"=\s*([0-9.]+)"'
+    component: validation_tools.aws_provider.version
+  - path: terraform/modules/aws-vpc-network/versions.tf
+    pattern: 'required_version\s*=\s*"=\s*([0-9.]+)"'
+    component: validation_tools.terraform.version
+  - path: terraform/modules/aws-vpc-network/versions.tf
+    pattern: '(?m)^\s*version\s*=\s*"=\s*([0-9.]+)"'
+    component: validation_tools.aws_provider.version
+  - path: terraform/modules/aws-eks/versions.tf
+    pattern: 'required_version\s*=\s*"=\s*([0-9.]+)"'
+    component: validation_tools.terraform.version
+  - path: terraform/modules/aws-eks/versions.tf
+    pattern: '(?m)^\s*version\s*=\s*"=\s*([0-9.]+)"'
+    component: validation_tools.aws_provider.version
+  - path: terraform/modules/aws-eks/variables.tf
+    pattern: '(?s)variable "cluster_version" \{.*?default\s*=\s*"([0-9.]+)"'
+    component: kubernetes_platform.eks.version
+  - path: terraform/modules/aws-eks/variables.tf
+    pattern: '(?s)variable "ebs_csi_addon_version" \{.*?default\s*=\s*"v([0-9.]+)-eksbuild'
+    component: kubernetes_platform.ebs_csi_driver.version
+  - path: terraform/environments/aws/versions.tf
+    pattern: 'required_version\s*=\s*"=\s*([0-9.]+)"'
+    component: validation_tools.terraform.version
+  - path: terraform/environments/aws/versions.tf
+    pattern: '(?m)^\s*version\s*=\s*"=\s*([0-9.]+)"'
+    component: validation_tools.aws_provider.version
+  - path: terraform/environments/self-hosted-k8s/main.tf
+    pattern: 'required_version\s*=\s*"=\s*([0-9.]+)"'
+    component: validation_tools.terraform.version
+  - path: terraform/environments/self-hosted-k8s/main.tf
+    pattern: '(?m)^\s*version\s*=\s*"=\s*([0-9.]+)"'
+    component: validation_tools.aws_provider.version
+  - path: terraform/environments/docker/main.tf
+    pattern: 'required_version\s*=\s*"=\s*([0-9.]+)"'
+    component: validation_tools.terraform.version
+  - path: terraform/environments/docker/main.tf
+    pattern: '(?m)^\s*version\s*=\s*"=\s*([0-9.]+)"'
+    component: validation_tools.aws_provider.version

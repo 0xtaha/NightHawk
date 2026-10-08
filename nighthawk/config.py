@@ -403,6 +403,89 @@ def validate_migration(platform: Platform, previous: Platform) -> None:
             raise ConfigurationError(f"{stream.backend_id}: backend ID cannot be reassigned to another tenant/datastream")
 
 
+def load_versions(path: Path = ROOT / "config" / "versions.yaml") -> dict:
+    return load_document(path, "versions.schema.json")
+
+
+def is_os_supported(matrix: dict, target: str, distribution: str, version: str, architecture: str) -> bool:
+    """Check distribution/version/architecture against one of os_support's declared target sets.
+
+    `target` must be "docker_hosts" or "k3s_nodes"; an unrecognized target or any
+    undeclared distribution/version/architecture combination is reported unsupported.
+    """
+    os_support = mapping(matrix.get("os_support", {}))
+    for entry in sequence(os_support.get(target, [])):
+        item = mapping(entry)
+        if (
+            string(item["distribution"]) == distribution
+            and version in sequence(item["versions"])
+            and architecture in sequence(item["architectures"])
+        ):
+            return True
+    return False
+
+
+def resolve_pin(matrix: dict, dotted_path: str) -> object:
+    """Resolve a dotted component path (e.g. 'validation_tools.terraform.version') from the matrix."""
+    node: object = matrix
+    for part in dotted_path.split("."):
+        node = mapping(node)[part]
+    return node
+
+
+def _pin_components(document: dict, path: tuple[str, ...] = ()) -> dict[tuple[str, ...], dict]:
+    components: dict[tuple[str, ...], dict] = {}
+    for key, value in document.items():
+        if isinstance(value, dict):
+            if "runtime_verified" in value:
+                components[path + (key,)] = value
+            else:
+                components.update(_pin_components(value, path + (key,)))
+    return components
+
+
+def validate_pin_changes(matrix: dict, previous: dict) -> None:
+    """Reject a version/mode change on a runtime_verified component unless the same update resets it to false."""
+    current = _pin_components(matrix)
+    old = _pin_components(previous)
+    for key, pin in current.items():
+        old_pin = old.get(key)
+        if old_pin is None:
+            continue
+        changed_fields = sorted(
+            field for field in pin
+            if field != "runtime_verified" and pin.get(field) != old_pin.get(field)
+        )
+        if changed_fields and old_pin.get("runtime_verified") is True and pin.get("runtime_verified") is not False:
+            name = ".".join(key)
+            raise ConfigurationError(
+                f"{name}: changing {', '.join(changed_fields)} requires resetting runtime_verified to false"
+            )
+
+
+def check_pins(matrix: dict, root: Path = ROOT) -> list[str]:
+    """Compare each tracked_consumers entry against its matrix pin; return human-readable mismatches."""
+    mismatches: list[str] = []
+    for raw in sequence(matrix.get("tracked_consumers", [])):
+        entry = mapping(raw)
+        rel_path = string(entry["path"])
+        pattern = string(entry["pattern"])
+        component = string(entry["component"])
+        expected = str(resolve_pin(matrix, component))
+        file_path = root / rel_path
+        try:
+            content = file_path.read_text(encoding="utf-8")
+        except OSError as error:
+            raise ConfigurationError(f"{rel_path}: cannot read tracked consumer file: {error}") from error
+        match = re.search(pattern, content)
+        if match is None:
+            raise ConfigurationError(f"{rel_path}: pattern for {component} matched no content")
+        actual = match.group(1)
+        if actual != expected:
+            mismatches.append(f"{rel_path}: {component} pin is {expected!r} but file declares {actual!r}")
+    return mismatches
+
+
 def load_network(path: Path) -> list[dict]:
     data = load_document(path, "network.schema.json")
     rules = [mapping(rule) for rule in sequence(data["rules"])]

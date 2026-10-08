@@ -1,0 +1,233 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nighthawk.local/schema/versions.schema.json",
+  "title": "NightHawk compatibility matrix",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "backends",
+    "object_storage",
+    "kubernetes_platform",
+    "grafana_charts",
+    "validation_tools",
+    "secrets_tools",
+    "os_support",
+    "tracked_consumers"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "backends": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mimir", "loki", "tempo", "pyroscope"],
+      "properties": {
+        "mimir": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "source", "runtime_verified", "compose_architecture", "production_architecture"],
+          "properties": {
+            "version": { "$ref": "#/$defs/version" },
+            "source": { "$ref": "#/$defs/source" },
+            "runtime_verified": { "type": "boolean" },
+            "compose_architecture": { "type": "string", "enum": ["classic", "ingest-storage"] },
+            "production_architecture": { "type": "string", "enum": ["classic", "ingest-storage"] }
+          }
+        },
+        "loki": { "$ref": "#/$defs/pin" },
+        "tempo": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "source", "runtime_verified", "compose_architecture", "production_architecture"],
+          "properties": {
+            "version": { "$ref": "#/$defs/version" },
+            "source": { "$ref": "#/$defs/source" },
+            "runtime_verified": { "type": "boolean" },
+            "compose_architecture": { "type": "string", "enum": ["monolithic", "distributed-kafka"] },
+            "production_architecture": { "type": "string", "enum": ["monolithic", "distributed-kafka"] }
+          }
+        },
+        "pyroscope": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "source", "runtime_verified", "storage", "retention_override"],
+          "properties": {
+            "version": { "$ref": "#/$defs/version" },
+            "source": { "$ref": "#/$defs/source" },
+            "runtime_verified": { "type": "boolean" },
+            "storage": { "type": "string", "enum": ["v1", "v2"] },
+            "retention_override": { "type": "string", "enum": ["retention_period"] }
+          }
+        }
+      }
+    },
+    "object_storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "version", "source", "chart_version", "chart_source", "runtime_verified"],
+      "properties": {
+        "provider": { "type": "string", "enum": ["seaweedfs"] },
+        "version": { "$ref": "#/$defs/version" },
+        "source": { "$ref": "#/$defs/source" },
+        "chart_version": { "$ref": "#/$defs/version" },
+        "chart_source": { "$ref": "#/$defs/source" },
+        "runtime_verified": { "type": "boolean" }
+      }
+    },
+    "kubernetes_platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["k3s", "cilium", "metallb", "longhorn", "traefik", "cert_manager", "strimzi", "eks", "ebs_csi_driver"],
+      "properties": {
+        "k3s": { "$ref": "#/$defs/pin" },
+        "cilium": { "$ref": "#/$defs/pin" },
+        "metallb": { "$ref": "#/$defs/pin" },
+        "longhorn": { "$ref": "#/$defs/pin" },
+        "traefik": { "$ref": "#/$defs/pin" },
+        "cert_manager": { "$ref": "#/$defs/pin" },
+        "eks": { "$ref": "#/$defs/pin" },
+        "ebs_csi_driver": { "$ref": "#/$defs/pin" },
+        "strimzi": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "source", "runtime_verified", "kafka_version", "kafka_source"],
+          "properties": {
+            "version": { "$ref": "#/$defs/version" },
+            "source": { "$ref": "#/$defs/source" },
+            "runtime_verified": { "type": "boolean" },
+            "kafka_version": { "$ref": "#/$defs/version" },
+            "kafka_source": { "$ref": "#/$defs/source" }
+          }
+        }
+      }
+    },
+    "grafana_charts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["grafana", "loki", "tempo_distributed", "mimir_distributed", "pyroscope"],
+      "properties": {
+        "grafana": { "$ref": "#/$defs/chart_pin" },
+        "loki": { "$ref": "#/$defs/chart_pin" },
+        "tempo_distributed": { "$ref": "#/$defs/chart_pin" },
+        "mimir_distributed": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "app_version", "source", "runtime_verified", "release_channel"],
+          "properties": {
+            "version": { "$ref": "#/$defs/version" },
+            "app_version": { "$ref": "#/$defs/app_version" },
+            "source": { "$ref": "#/$defs/source" },
+            "runtime_verified": { "type": "boolean" },
+            "release_channel": { "type": "string", "enum": ["stable", "weekly"] }
+          }
+        },
+        "pyroscope": { "$ref": "#/$defs/chart_pin" }
+      }
+    },
+    "validation_tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["terraform", "aws_provider"],
+      "properties": {
+        "terraform": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "sha256"],
+          "properties": {
+            "version": { "$ref": "#/$defs/version" },
+            "sha256": {
+              "type": "object",
+              "additionalProperties": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+            }
+          }
+        },
+        "aws_provider": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source", "version"],
+          "properties": {
+            "source": { "type": "string", "minLength": 1 },
+            "version": { "$ref": "#/$defs/version" }
+          }
+        }
+      }
+    },
+    "secrets_tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sops", "age"],
+      "properties": {
+        "sops": { "$ref": "#/$defs/pin" },
+        "age": { "$ref": "#/$defs/pin" }
+      }
+    },
+    "os_support": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["docker_hosts", "k3s_nodes"],
+      "properties": {
+        "docker_hosts": { "type": "array", "items": { "$ref": "#/$defs/os_target" }, "minItems": 1 },
+        "k3s_nodes": { "type": "array", "items": { "$ref": "#/$defs/os_target" }, "minItems": 1 }
+      }
+    },
+    "tracked_consumers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "pattern", "component"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "pattern": { "type": "string", "minLength": 1 },
+          "component": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "version": {
+      "type": "string",
+      "pattern": "^v?[0-9]+(\\.[0-9]+){0,3}([+-][A-Za-z0-9.]+)*$"
+    },
+    "app_version": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9.+_-]*$"
+    },
+    "source": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://"
+    },
+    "pin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "source", "runtime_verified"],
+      "properties": {
+        "version": { "$ref": "#/$defs/version" },
+        "source": { "$ref": "#/$defs/source" },
+        "runtime_verified": { "type": "boolean" }
+      }
+    },
+    "chart_pin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "app_version", "source", "runtime_verified"],
+      "properties": {
+        "version": { "$ref": "#/$defs/version" },
+        "app_version": { "$ref": "#/$defs/app_version" },
+        "source": { "$ref": "#/$defs/source" },
+        "runtime_verified": { "type": "boolean" }
+      }
+    },
+    "os_target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["distribution", "versions", "architectures"],
+      "properties": {
+        "distribution": { "type": "string", "minLength": 1 },
+        "versions": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 },
+        "architectures": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 }
+      }
+    }
+  }
+}

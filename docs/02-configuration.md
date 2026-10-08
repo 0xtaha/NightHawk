@@ -4,8 +4,11 @@
 
 The Python CLI validates and renders **non-secret intermediate contracts**.
 It also emits a version-gated Pyroscope v2 retention override fragment.
-It does not yet deploy the platform, generate complete backend-native configuration,
-decrypt secrets, enforce gateway authentication, or implement redaction.
+It implements the full SOPS + age secrets lifecycle (recipient generation,
+encryption, rotation, materialization, cleanup) gated on a `doctor`
+prerequisite check, and a `check-pins` drift check against the compatibility
+matrix. It does not yet deploy the platform, generate complete backend-native
+configuration, enforce gateway authentication, or implement redaction.
 The initial network contract contains shared entry points, not a complete
 Kubernetes or host firewall. Do not deploy it as a complete allowlist.
 
@@ -139,6 +142,59 @@ removed in a more recent snapshot. Deployment orchestration must preserve that
 history, including previous resolved storage bindings. No migration execution
 command is implemented yet.
 
+## Secrets workflow
+
+Every secrets subcommand first runs the same prerequisite check as
+`nighthawk doctor`: it shells out to `sops --version` and `age --version` and
+compares the result to the pins in `config/versions.yaml`. If either binary is
+missing or mismatched, the command exits nonzero and writes no file:
+
+```console
+$ python -m nighthawk doctor --versions config/versions.yaml
+FAIL: sops is not available: [Errno 2] No such file or directory: 'sops'
+FAIL: age is not available: [Errno 2] No such file or directory: 'age'
+```
+
+With `sops`/`age` installed and matching their pinned versions:
+
+```console
+# Generate a local age key pair (non-production use; refuses to overwrite
+# an existing file without --overwrite).
+python -m nighthawk generate-recipient --output secrets/dev.agekey
+
+# Encrypt a new secret value under secrets/<file> for one or more recipients.
+python -m nighthawk encrypt-secret --file local.sops.yaml --key mimir-storage \
+    --recipient age1exampleexampleexampleexampleexampleexampleexampleexamplex \
+    --value "s3-secret-key"
+
+# Rotate an existing key's value in place, keeping the same recipients.
+python -m nighthawk rotate-secret --file local.sops.yaml --key mimir-storage \
+    --value "new-s3-secret-key"
+
+# Decrypt every secret referenced by a validated platform document into
+# .materialized-secrets/ (created with owner-only 0700/0600 permissions).
+python -m nighthawk materialize-secrets --config config/tenants.example.yaml
+
+# Remove the decrypted material once it is no longer needed.
+python -m nighthawk clean-secrets
+```
+
+`config/tenants.example.yaml` declares `profile: development`, so its
+secret references may resolve to locally auto-generated recipients.
+Documents with `profile: production` reject locally auto-generated age
+recipients recorded in `.generated/age-recipients.local.json` unless
+`--confirm-production-recipients` is passed explicitly, and require an
+explicit, non-empty recipient list.
+
+`nighthawk check-pins` compares each `tracked_consumers` entry in
+`config/versions.yaml` (currently both Terraform `versions.tf` files) against
+the matrix pins and reports any divergence:
+
+```console
+$ python -m nighthawk check-pins
+All 4 tracked consumer(s) match the compatibility matrix.
+```
+
 ## Troubleshooting and cleanup
 
 - Unknown secret: add the intended reference, not a plaintext fallback value.
@@ -148,9 +204,10 @@ command is implemented yet.
   the generated artifacts after reviewing them.
 - Dependency errors: use the isolated interpreter and install the pinned
   requirements; do not substitute system packages silently.
+- Missing or mismatched `sops`/`age`: run `nighthawk doctor` to see which
+  binary is absent or out of date; every secrets subcommand fails the same way
+  before writing any file.
 
 Validation and rendering create no remote resources and need no infrastructure
 rollback. Generated files are ignored by Git. A POSIX directory mode is requested
-for output, but it is not a substitute for Windows ACLs. Since these commands
-never materialize decrypted secrets, a secure runtime-secret workflow remains
-a separate implementation gate.
+for output, but it is not a substitute for Windows ACLs.

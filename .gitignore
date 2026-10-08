@@ -16,6 +16,7 @@ backend.hcl
 secrets/*
 !secrets/*.sops.yaml
 !secrets/*.sops.json
+.materialized-secrets/
 *.pem
 *.key
 !*.example

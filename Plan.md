@@ -87,6 +87,14 @@ Create validated platform/tenant/network schemas, examples, renderer, secret wor
 
 ### 2. Implement Terraform infrastructure and state bootstrap
 
+> **Amendment:** The `minio-backend` module named below was superseded before
+> implementation. The approved local-storage decision is SeaweedFS on local
+> disks/PVCs, owned by Compose initialization and Ansible/Helm orchestration,
+> not a Terraform-managed MinIO module; see `docs/01-architecture.md`'s
+> Storage amendments section for the full rationale (MinIO Community's
+> upstream repository is unmaintained). `minio-backend` was intentionally
+> not built as part of implementing this phase.
+
 Add complete modules for `aws-vpc-network`, `aws-eks`, `aws-s3-backends`, and `minio-backend`, each with variables, outputs, validation, and concise explanations of non-obvious decisions.
 
 Add a separate AWS state-bootstrap root plus `environments/aws`, `environments/self-hosted-k8s`, and `environments/docker`. Backend configuration belongs to each executable root; avoid an ineffective top-level-only `backend.tf`.

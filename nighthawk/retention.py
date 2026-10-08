@@ -16,7 +16,7 @@ def pyroscope_overrides(
         "storage": "v2",
         "retention_override": "retention_period",
     }
-    if versions.get("schema_version") != 1 or backend != expected:
+    if versions.get("schema_version") != 1 or any(backend.get(key) != value for key, value in expected.items()):
         raise ConfigurationError(
             "Pyroscope overrides require the source-verified 2.3.1 v2 retention_period contract; "
             "validate a new version/storage mode before changing the pin"

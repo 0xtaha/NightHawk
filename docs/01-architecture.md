@@ -19,13 +19,13 @@ included. No numeric quickstart startup target has been supplied.
 See the [Mermaid architecture and monitoring-flow diagrams](03-diagrams.md)
 for visual overviews of these profiles and the telemetry lifecycle.
 
-| Profile | Compute | Telemetry storage | Availability |
-| --- | --- | --- | --- |
-| Docker development | Local Docker Compose | Private SeaweedFS on local named volumes | Single-node, non-HA |
-| Docker production | Explicitly configured Linux host | Private SeaweedFS on local disks | Single-node, non-HA |
-| Self-hosted development | Existing Linux node, k3s | SeaweedFS on local PVCs | Reduced footprint, non-HA |
-| Self-hosted production | Existing Linux nodes, k3s | SeaweedFS on replicated local PVC-backed storage | Requires validated disks and distinct failure domains |
-| AWS production | Multi-AZ EKS managed node groups | Separate component S3 buckets | Requires validated replicas, capacity, and failure domains |
+| Profile | Compute | Telemetry storage | Availability | Terraform root(s) |
+| --- | --- | --- | --- | --- |
+| Docker development | Local Docker Compose | Private SeaweedFS on local named volumes | Single-node, non-HA | `environments/docker` (zero-resource placeholder; Compose-owned) |
+| Docker production | Explicitly configured Linux host | Private SeaweedFS on local disks | Single-node, non-HA | `environments/docker` (zero-resource placeholder; Compose-owned) |
+| Self-hosted development | Existing Linux node, k3s | SeaweedFS on local PVCs | Reduced footprint, non-HA | `environments/self-hosted-k8s` (zero-resource placeholder; Ansible/Helm-owned) |
+| Self-hosted production | Existing Linux nodes, k3s | SeaweedFS on replicated local PVC-backed storage | Requires validated disks and distinct failure domains | `environments/self-hosted-k8s` (zero-resource placeholder; Ansible/Helm-owned) |
+| AWS production | Multi-AZ EKS managed node groups | Separate component S3 buckets | Requires validated replicas, capacity, and failure domains | `environments/aws-state-bootstrap`, `environments/aws` (VPC+EKS), `environments/aws-storage` |
 
 Compose uses monolithic backends and does not introduce Kafka. Kubernetes uses
 official Grafana charts and includes Strimzi-managed Kafka when required by the
@@ -43,6 +43,17 @@ capacity; optional spot capacity is limited to suitable stateless workloads.
 Use IRSA rather than static AWS keys. Install Helm releases only after cluster
 creation succeeds; Terraform must not initialize Kubernetes providers against
 a cluster that does not yet exist.
+
+This is implemented as four independently applied Terraform environment
+roots under `terraform/environments/`: `aws-state-bootstrap` (the encrypted
+S3 state bucket and DynamoDB lock table every other AWS root's backend
+depends on), `aws-storage` (per-component S3 buckets via the
+`object-storage` facade), `aws` (the VPC, EKS cluster, managed node groups,
+and OIDC/IRSA wiring, composing the `aws-vpc-network` and `aws-eks`
+modules), and two zero-resource placeholder roots, `self-hosted-k8s` and
+`docker`, that exist only to carry a pinned `terraform`/`aws` provider
+version for the compatibility matrix since those profiles' local
+infrastructure is Ansible/Helm-owned, not Terraform-owned.
 
 ## Data and trust boundaries
 
@@ -105,9 +116,17 @@ groups and stateless NACLs require different return-traffic rules.
 
 Generated decrypted configuration is ignored by Git, created with restricted
 permissions, and cleaned up explicitly. Production requires operator-provided
-age recipients and trust/DNS inputs. SOPS with age is the baseline for secret
-generation, encryption, decryption, and rotation; examples contain references,
-not working credentials.
+age recipients and trust/DNS inputs. SOPS with age is the implemented secret
+lifecycle: `nighthawk doctor` verifies the `sops`/`age` binaries against the
+pinned versions in `config/versions.yaml` before any secrets command runs,
+`nighthawk generate-recipient` creates age key pairs for non-production use,
+`nighthawk encrypt-secret` and `nighthawk rotate-secret` manage SOPS-encrypted
+files under `secrets/`, and `nighthawk materialize-secrets` /
+`nighthawk clean-secrets` decrypt a validated platform document's referenced
+secrets into `.materialized-secrets/` (owner-only permissions) and remove them
+again. Production-profile documents reject locally auto-generated age
+recipients unless explicitly confirmed. Examples contain references, not
+working credentials.
 
 ## Retention and object storage
 

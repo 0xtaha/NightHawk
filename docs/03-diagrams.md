@@ -5,9 +5,11 @@ approved SeaweedFS and AWS storage decisions. They do not represent a deployed
 platform.
 
 The configuration validator/intermediate renderer, Pyroscope retention fragment,
-and AWS storage Terraform modules are implemented and locally tested.
-Runtime collection, gateway enforcement, dashboards, alerting, and full deployment
-automation remain planned.
+SOPS + age secrets lifecycle, AWS storage Terraform modules, the Terraform
+state-bootstrap root, the AWS VPC/EKS compute root, and the self-hosted/Docker
+zero-resource Terraform boundary roots are implemented and locally tested.
+Runtime collection, gateway enforcement, dashboards, alerting, and full
+deployment automation remain planned.
 
 ## 1. Platform architecture
 
@@ -20,7 +22,7 @@ flowchart TB
     subgraph Control["Configuration and provisioning"]
         Config["Platform, tenant and network contracts"]
         Renderer["Typed Python validator<br/>and intermediate renderer"]
-        Secrets["SOPS + age<br/>planned secret lifecycle"]
+        Secrets["SOPS + age<br/>secret lifecycle implemented"]
         Terraform["Terraform object-storage facade<br/>AWS adapter implemented"]
         Config --> Renderer
         Secrets -. "credential and trust references" .-> Renderer
@@ -76,10 +78,16 @@ flowchart TB
     end
 
     subgraph Cloud["Cloud deployment - AWS"]
-        EKS["Multi-AZ EKS<br/>on-demand capacity for stateful workloads"]
+        StateBootstrap["Terraform aws-state-bootstrap<br/>encrypted S3 state + DynamoDB lock, implemented"]
+        EKS["Multi-AZ EKS<br/>on-demand capacity for stateful workloads<br/>aws-vpc-network + aws-eks modules implemented"]
         S3["Private S3 buckets<br/>per-backend KMS encryption"]
         IRSA["Per-backend IRSA roles<br/>bucket-scoped permissions"]
         CloudDB["HA PostgreSQL for multi-replica Grafana<br/>no SeaweedFS metadata database"]
+    end
+
+    subgraph Boundary["Zero-resource Terraform boundary roots"]
+        SelfHostedBoundary["environments/self-hosted-k8s<br/>Ansible/Helm-owned, implemented"]
+        DockerBoundary["environments/docker<br/>Compose-owned, implemented"]
     end
 
     LocalRuntime -. "hosts" .-> Core
@@ -91,9 +99,13 @@ flowchart TB
     Grafana -. "AWS multi-replica" .-> CloudDB
     Terraform -. "provisions when authorized" .-> S3
     Terraform -. "provisions when authorized" .-> IRSA
+    StateBootstrap -. "remote state backend for" .-> EKS
+    StateBootstrap -. "remote state backend for" .-> S3
+    SelfHostedBoundary -. "applies zero resources; hosts Ansible/Helm-managed" .-> LocalRuntime
+    DockerBoundary -. "applies zero resources; hosts Compose-managed" .-> LocalRuntime
 
     classDef implemented fill:#dbeafe,stroke:#2563eb,color:#172554
-    class Config,Renderer,Terraform implemented
+    class Config,Renderer,Terraform,Secrets,StateBootstrap,EKS,IRSA,SelfHostedBoundary,DockerBoundary implemented
 ```
 
 **Reading the diagram**
@@ -109,8 +121,14 @@ flowchart TB
   backend architectures, not a dependency of Loki or Pyroscope.
 - The self-hosted HA PostgreSQL cluster is shared to reduce resource usage.
   Separate databases and credentials do not eliminate its shared failure domain.
-- The diagram omits the separately protected Terraform state/bootstrap store.
-  It is not a telemetry bucket and must not be included in ordinary teardown.
+- `aws-state-bootstrap` is a separately protected, destroy-protected Terraform
+  state/bootstrap store. It is not a telemetry bucket and must not be included
+  in ordinary teardown; it is shown only as the remote-state backend other AWS
+  roots depend on.
+- The `self-hosted-k8s` and `docker` boundary roots apply zero resources; they
+  exist only to carry pinned `terraform`/`aws` provider versions and to
+  enforce, via a guard test, that Terraform never competes with Ansible/Helm
+  or Compose for ownership of local infrastructure.
 
 ## 2. How monitoring works
 

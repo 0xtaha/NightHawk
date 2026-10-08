@@ -1,0 +1,24 @@
+region      = "eu-west-1"
+account_id  = "123456789012"
+name_prefix = "replace-with-unique-prefix"
+
+vpc_cidr = "10.0.0.0/16"
+az_count = 2
+
+cluster_version       = "1.37"
+ebs_csi_addon_version = "v1.66.0-eksbuild.1"
+
+stateful_node_group = {
+  desired_size = 2
+  min_size     = 2
+  max_size     = 4
+}
+
+stateless_node_group = {
+  desired_size  = 1
+  min_size      = 0
+  max_size      = 4
+  capacity_type = "ON_DEMAND"
+}
+
+tags = { Environment = "production" }
