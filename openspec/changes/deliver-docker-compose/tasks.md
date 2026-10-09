@@ -177,7 +177,7 @@
       identifier on every item, every drop field carrying a unique marker
       in each documented position, and a non-2xx response producing a
       non-zero exit naming the signal and status.
-- [ ] 8.2 Add `sample-workload/` (instrumented service, pinned
+- [x] 8.2 Add `sample-workload/` (instrumented service, pinned
       requirements, Dockerfile, non-root) and wire it to the Compose
       `sample` profile. Verify the image builds, and with the stack running
       and the profile enabled each of the four data sources returns data
@@ -194,7 +194,7 @@
       whether the platform or the test is wrong; fix platform defects, and
       record anything attributable to Podman as a documented limitation
       instead of weakening the assertion.
-- [ ] 9.3 Measure cold start (empty volumes, images present) and warm start
+- [x] 9.3 Measure cold start (empty volumes, images present) and warm start
       (existing volumes) of the quickstart three times each, and peak
       memory per service. Verify the numbers, machine, and runtime are
       recorded in `docs/00-quickstart.md`.
@@ -205,7 +205,7 @@
 
 ## 10. Documentation and closing checks
 
-- [ ] 10.1 Write `docs/00-quickstart.md` (prerequisites including the
+- [x] 10.1 Write `docs/00-quickstart.md` (prerequisites including the
       Podman socket setup and resource assumptions, the one command,
       expected output, where to log in, teardown, purge, troubleshooting)
       and complete `docs/07-docker-compose.md` (topology and networks,
@@ -214,12 +214,12 @@
       observed results and Podman differences, what remains unverified such
       as retention deletion). Verify every command in both documents by
       running it as written.
-- [ ] 10.2 Update `docs/01-architecture.md`, `docs/03-diagrams.md`, and
+- [x] 10.2 Update `docs/01-architecture.md`, `docs/03-diagrams.md`, and
       the "What is still unproven" and "Validation" sections of
       `docs/04` to `docs/06` to reflect what was observed at runtime and
       what was not. Verify no document claims Docker Engine or production
       verification.
-- [ ] 10.3 Run the unit suite, `check-pins`, `compose config` for both file
+- [x] 10.3 Run the unit suite, `check-pins`, `compose config` for both file
       sets, and `openspec validate deliver-docker-compose --strict`; verify
       all succeed, then run `teardown-docker` and confirm no NightHawk
       container is left running while the volumes remain.

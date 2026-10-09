@@ -81,9 +81,9 @@ $ cat .materialized-secrets/runtime/grafana/admin-password
 
 Running the command again is safe. It reuses everything, re-renders, tells
 the auth service and collector to reload if their files changed, and ends in
-the same state. Use `--no-build` to skip rebuilding the NightHawk image, and
-`--compose "podman compose"` or `NIGHTHAWK_COMPOSE` to use another Compose
-command.
+the same state. Use `--no-build` to skip rebuilding the NightHawk image.
+`--compose` or `NIGHTHAWK_COMPOSE` selects another Compose command; only
+`docker compose` has been tried.
 
 ## Reach it
 
@@ -172,11 +172,43 @@ requires a purge first because stored data is tied to the old storage keys.
 
 ## Startup time and memory
 
-No startup target is claimed. Measured so far on Fedora 43, rootless Podman
-5.8.4, 4 CPUs, 16 GB RAM, with all images already present and the NightHawk
-image already built: two cold starts (empty volumes) took 100 s and 95 s from
-the command to its last line. Warm-start times and per-service memory have
-not been recorded yet.
+No startup target is claimed. Measured on 2026-10-09 and 2026-10-10 on
+Fedora 43 with rootless Podman 5.8.4 and Docker Compose 5.3.1, 4 CPUs and
+16 GB RAM, with all images already present and the NightHawk image already
+built (`--no-build`). Times are from the command to its last line and
+include secret decryption, rendering, start-up, and Grafana provisioning.
+
+| Start | Runs | Time |
+| --- | --- | --- |
+| Cold: volumes purged, secrets and certificates kept | 3 | 100 s, 95 s, 102 s |
+| Warm: after `teardown-docker`, volumes kept | 3 | 95 s, 93 s, 97 s |
+| Re-run while the stack is already up | 1 | 17 s |
+
+Warm is barely faster than cold because most of the time is fixed waits, not
+work: Mimir and Pyroscope each hold readiness back for a set period after
+starting, and the stack starts in dependency order behind them. A first run
+that also pulls images, builds the NightHawk image, and generates secrets
+was not timed; on this machine's connection the pulls alone took over ten
+minutes.
+
+Memory in use a few minutes after start, with the sample workload running
+and little load. This is idle usage, not a peak under load.
+
+| Service | Memory | Limit |
+| --- | --- | --- |
+| Grafana | 231 MB | 1 GB |
+| SeaweedFS | 118 MB | 1 GB |
+| Alloy | 63 MB | 1 GB |
+| Mimir | 52 MB | 2 GB |
+| Loki | 43 MB | 2 GB |
+| auth service | 39 MB | 256 MB |
+| Tempo | 25 MB | 2 GB |
+| Pyroscope | 23 MB | 2 GB |
+| Traefik | 19 MB | 512 MB |
+| sample workload | 50 MB | 256 MB |
+
+About 0.7 GB in total. The limits are generous starting points, not tuned
+values.
 
 ## Troubleshooting
 

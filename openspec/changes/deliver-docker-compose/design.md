@@ -290,6 +290,37 @@ differently under Podman, are written to `docs/07-docker-compose.md`.
 components these tests exercised, and the docs say that the verification was
 under Podman.
 
+### Findings during implementation
+
+- Services run as the user that owns the secret files, not as each image's
+  default user. Under rootless Podman that is container root, because a
+  `keep-id` user namespace requested through the Docker API intermittently
+  produced unusable ID mappings. A root `volume-init` one-shot gives named
+  volumes to that user.
+- Readiness of the four backends and Alloy is observed by one shared
+  `wait-backends` and a `wait-alloy` one-shot, since those images have no
+  probe binary. `compose up --wait` fails when a leaf one-shot exits, so the
+  quickstart waits on named services and runs `grafana-init` and the
+  fixture emitter through `compose run` from a `tools` profile.
+- The SDK profile receiver is generated for push-capable collector profiles
+  instead of living in a shared source file; the per-profile
+  `profiles.alloy` files that held only that receiver were removed.
+- The storage CA reaches backends as `SSL_CERT_FILE` rather than a
+  per-backend TLS setting.
+- Pyroscope's v2 storage and data directories are command-line flags in the
+  Compose file; no YAML form was found at 2.3.1.
+- Backend settings are recorded as verified by starting the pinned image,
+  not with a source URL per setting.
+- Running the stack exposed defects in Phase 3 output, fixed here:
+  `otelcol.auth.basic` with `client_auth`, Tempo's missing burst, the
+  missing Pyroscope ingest route, unredacted JSON pairs in OTLP log bodies,
+  and non-idempotent Grafana provisioning.
+- The external S3 override resolves but cannot be selected by any valid
+  Docker platform document yet, so it was not run.
+- `runtime_verified` was set for the backends, SeaweedFS, Alloy, `sops`, and
+  `age`. Traefik and Grafana are pinned as Kubernetes charts and keep
+  `false`, although their images ran.
+
 ## Risks / Trade-offs
 
 - [Risk] Image pulls are slow here and the stack is large; a pull or a
