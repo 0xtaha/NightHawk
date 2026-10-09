@@ -135,7 +135,8 @@ def load_document(path: Path, schema_name: str) -> dict:
 @dataclass(frozen=True)
 class SignalPolicy:
     retention_hours: int
-    ingestion_rate_bytes_per_second: int
+    # Samples per second for metrics (Mimir enforces a sample rate), bytes per second otherwise.
+    ingestion_rate: int
     query_concurrency: int
 
 
@@ -198,10 +199,42 @@ class StorageBinding:
 
 
 @dataclass(frozen=True)
+class EntryPoint:
+    """One gateway listener; several selected network rules may share its port."""
+
+    name: str
+    port: int
+    scope: str
+    rules: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Gateway:
+    hostname: str
+    entry_points: tuple[EntryPoint, ...]
+    grafana_entry_point: str
+    client_ca_secret_ref: str
+    client_ca_key_secret_ref: str | None
+    auth_service: str
+    upstreams: dict[str, str]
+    revoked_certificate_fingerprints: tuple[str, ...]
+
+    def entry_point(self, rule_id: str) -> EntryPoint:
+        for entry in self.entry_points:
+            if rule_id in entry.rules:
+                return entry
+        raise ConfigurationError(f"gateway: {rule_id!r} is not a selected entry point")
+
+    def url(self, rule_id: str) -> str:
+        return f"https://{self.hostname}:{self.entry_point(rule_id).port}"
+
+
+@dataclass(frozen=True)
 class Platform:
     schema_version: int
     deployment: str
     profile: str
+    gateway: Gateway
     storage_provider: str
     bindings: dict[str, StorageBinding]
     secrets: dict[str, SecretReference]
@@ -287,7 +320,76 @@ def _storage(
     return provider, bindings
 
 
-def load_platform(path: Path, storage_output: Path | None = None) -> Platform:
+SCOPE_EXPOSURE = ("loopback", "private", "restricted-external")
+UPSTREAM_SIGNAL = {
+    "metrics": "metrics", "logs": "logs", "profiles": "profiles",
+    "traces.query": "traces", "traces.otlp_grpc": "traces", "traces.otlp_http": "traces",
+}
+UPSTREAM_DESTINATION = {"metrics": "mimir", "logs": "loki", "traces": "tempo", "profiles": "pyroscope"}
+
+
+def _gateway(
+    data: dict, secrets: dict[str, SecretReference], enabled_signals: set[str], rules: list[dict]
+) -> Gateway:
+    listeners = {rule["id"]: rule for rule in rules if rule["destination"] == "gateway"}
+    by_port: dict[int, list[dict]] = {}
+    for raw in sequence(data["entry_points"]):
+        rule_id = string(raw)
+        if rule_id not in listeners:
+            raise ConfigurationError(
+                f"gateway: entry point {rule_id!r} is not a network rule whose destination is the gateway"
+            )
+        by_port.setdefault(listeners[rule_id]["port"], []).append(listeners[rule_id])
+    # A listener shared by several rules is treated as exposed as its most exposed rule.
+    entry_points = tuple(
+        EntryPoint(
+            f"port-{port}", port,
+            max((rule["scope"] for rule in selected), key=SCOPE_EXPOSURE.index),
+            tuple(sorted(rule["id"] for rule in selected)),
+        )
+        for port, selected in sorted(by_port.items())
+    )
+    grafana_entry_point = string(data["grafana_entry_point"])
+    if not any(grafana_entry_point in entry.rules for entry in entry_points):
+        raise ConfigurationError(f"gateway: grafana_entry_point {grafana_entry_point!r} is not a selected entry point")
+    ca = string(data["client_ca_secret_ref"])
+    _require_secret(ca, secrets, "gateway")
+    ca_key = data.get("client_ca_key_secret_ref")
+    if ca_key is not None:
+        _require_secret(string(ca_key), secrets, "gateway")
+
+    def check_port(name: str, address: str, destination: str) -> str:
+        port = urlsplit(address).port
+        if not any(
+            rule["source"] == "gateway" and rule["destination"] == destination and rule["port"] == port
+            for rule in rules
+        ):
+            raise ConfigurationError(
+                f"gateway: {name} port {port} is not a network rule from gateway to {destination}"
+            )
+        return address
+
+    auth_service = check_port("auth_service", string(data["auth_service"]), "auth-service")
+    raw_upstreams = mapping(data["upstreams"])
+    upstreams: dict[str, str] = {}
+    for signal, raw in sorted(raw_upstreams.items()):
+        parts = {signal: raw} if isinstance(raw, str) else {
+            f"{signal}.{key}": value for key, value in sorted(mapping(raw).items())
+        }
+        for name, address in parts.items():
+            upstreams[name] = check_port(f"upstreams.{name}", string(address), UPSTREAM_DESTINATION[signal])
+    missing = enabled_signals - raw_upstreams.keys()
+    if missing:
+        raise ConfigurationError(f"gateway: missing upstreams for enabled signals: {', '.join(sorted(missing))}")
+    return Gateway(
+        string(data["hostname"]), entry_points, grafana_entry_point, ca, ca_key, auth_service, upstreams,
+        tuple(sorted(string(item) for item in sequence(data["revoked_certificate_fingerprints"]))),
+    )
+
+
+def load_platform(
+    path: Path, storage_output: Path | None = None, network: Path | None = None
+) -> Platform:
     document = mapping(load_yaml(path))
     if storage_output is not None:
         storage = mapping(load_yaml(storage_output))
@@ -331,9 +433,11 @@ def load_platform(path: Path, storage_output: Path | None = None) -> Platform:
                 hours = int(string(signal["retention"])[:-1])
                 if hours > MAX_RETENTION_HOURS or (name == "logs" and hours < 24):
                     raise ConfigurationError(f"{tenant_id}/{stream_id}/{name}: unsupported retention duration")
+                rate_field = (
+                    "ingestion_rate_samples_per_second" if name == "metrics" else "ingestion_rate_bytes_per_second"
+                )
                 signals[name] = SignalPolicy(
-                    hours, integer(signal["ingestion_rate_bytes_per_second"]),
-                    integer(signal["query_concurrency"]),
+                    hours, integer(signal[rate_field]), integer(signal["query_concurrency"]),
                 )
                 required_buckets.update(SIGNAL_BUCKETS[name])
             collection = mapping(stream["collection"])
@@ -385,8 +489,16 @@ def load_platform(path: Path, storage_output: Path | None = None) -> Platform:
     }
     if used_secrets & storage_refs:
         raise ConfigurationError("gateway credentials must not reuse object-storage secrets")
+    gateway = _gateway(
+        mapping(data["gateway"]), secrets,
+        {name for stream in streams for name in stream.signals},
+        load_network(network if network is not None else ROOT / "config" / "network.yaml"),
+    )
+    trust_refs = {gateway.client_ca_secret_ref, gateway.client_ca_key_secret_ref}
+    if (used_secrets | storage_refs) & trust_refs:
+        raise ConfigurationError("gateway CA references must not reuse credential or object-storage secrets")
     return Platform(
-        1, deployment, string(data["profile"]), provider, bindings, secrets,
+        1, deployment, string(data["profile"]), gateway, provider, bindings, secrets,
         tuple(sorted(streams, key=lambda stream: (stream.tenant, stream.datastream))),
         tuple(sorted(credentials, key=lambda credential: credential.id)),
     )

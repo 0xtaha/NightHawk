@@ -10,6 +10,7 @@
     "object_storage",
     "kubernetes_platform",
     "grafana_charts",
+    "collectors",
     "validation_tools",
     "secrets_tools",
     "os_support",
@@ -122,6 +123,14 @@
           }
         },
         "pyroscope": { "$ref": "#/$defs/chart_pin" }
+      }
+    },
+    "collectors": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["alloy"],
+      "properties": {
+        "alloy": { "$ref": "#/$defs/pin" }
       }
     },
     "validation_tools": {

@@ -32,3 +32,115 @@ rules:
     purpose: S3 via private service connectivity
     scope: private
     direction: source-to-destination
+  - id: grafana-gateway
+    source: grafana
+    destination: gateway
+    protocol: tcp
+    port: 443
+    purpose: Grafana data source queries through the tenant gateway
+    scope: private
+    direction: source-to-destination
+  - id: gateway-auth-service
+    source: gateway
+    destination: auth-service
+    protocol: tcp
+    port: 9180
+    purpose: Forward-auth tenant policy decisions
+    scope: private
+    direction: source-to-destination
+  - id: gateway-mimir
+    source: gateway
+    destination: mimir
+    protocol: tcp
+    port: 8080
+    purpose: Authenticated metrics ingestion and queries
+    scope: private
+    direction: source-to-destination
+  - id: gateway-loki
+    source: gateway
+    destination: loki
+    protocol: tcp
+    port: 3100
+    purpose: Authenticated log ingestion and queries
+    scope: private
+    direction: source-to-destination
+  - id: gateway-tempo-query
+    source: gateway
+    destination: tempo
+    protocol: tcp
+    port: 3200
+    purpose: Authenticated trace queries
+    scope: private
+    direction: source-to-destination
+  - id: gateway-tempo-otlp-grpc
+    source: gateway
+    destination: tempo
+    protocol: tcp
+    port: 4317
+    purpose: Authenticated OTLP gRPC trace ingestion
+    scope: private
+    direction: source-to-destination
+  - id: gateway-tempo-otlp-http
+    source: gateway
+    destination: tempo
+    protocol: tcp
+    port: 4318
+    purpose: Authenticated OTLP HTTP trace ingestion
+    scope: private
+    direction: source-to-destination
+  - id: gateway-pyroscope
+    source: gateway
+    destination: pyroscope
+    protocol: tcp
+    port: 4040
+    purpose: Authenticated profile ingestion and queries
+    scope: private
+    direction: source-to-destination
+  - id: collector-gateway-metrics
+    source: collector
+    destination: gateway-metrics
+    protocol: tcp
+    port: 8082
+    purpose: Self-monitoring scrape of gateway proxy metrics
+    scope: private
+    direction: source-to-destination
+  - id: collector-auth-service
+    source: collector
+    destination: auth-service
+    protocol: tcp
+    port: 9180
+    purpose: Self-monitoring scrape of auth service metrics
+    scope: private
+    direction: source-to-destination
+  - id: collector-mimir
+    source: collector
+    destination: mimir
+    protocol: tcp
+    port: 8080
+    purpose: Self-monitoring scrape of Mimir metrics
+    scope: private
+    direction: source-to-destination
+  - id: collector-loki
+    source: collector
+    destination: loki
+    protocol: tcp
+    port: 3100
+    purpose: Self-monitoring scrape of Loki metrics
+    scope: private
+    direction: source-to-destination
+  - id: collector-tempo
+    source: collector
+    destination: tempo
+    protocol: tcp
+    port: 3200
+    purpose: Self-monitoring scrape of Tempo metrics
+    scope: private
+    direction: source-to-destination
+  - id: collector-pyroscope
+    source: collector
+    destination: pyroscope
+    protocol: tcp
+    port: 4040
+    purpose: Self-monitoring scrape of Pyroscope metrics
+    scope: private
+    direction: source-to-destination

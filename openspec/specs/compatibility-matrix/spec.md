@@ -14,10 +14,10 @@ The compatibility matrix SHALL record an explicit, exact version pin for
 every component the architecture requires across all three deployment
 profiles: Mimir, Loki, Tempo, Pyroscope, SeaweedFS (and its Helm chart), k3s,
 Cilium, MetalLB, Longhorn, Traefik, cert-manager, Strimzi and the Kafka
-version it manages, the Grafana Helm charts used by the platform, Terraform,
-the AWS Terraform provider, the EKS-managed Kubernetes control-plane
-version, the EBS CSI driver addon version, SOPS, and age. A pin SHALL
-include a resolvable version identifier and, where the tool or chart
+version it manages, the Grafana Helm charts used by the platform, Grafana
+Alloy, Terraform, the AWS Terraform provider, the EKS-managed Kubernetes
+control-plane version, the EBS CSI driver addon version, SOPS, and age. A pin
+SHALL include a resolvable version identifier and, where the tool or chart
 publishes one, a source reference (release URL, changelog, or digest)
 supporting that it was verified rather than guessed.
 

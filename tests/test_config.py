@@ -249,6 +249,71 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigurationError, "terraform output -json storage"):
             load_platform(self.write(), storage_path)
 
+    def test_gateway_is_loaded_with_listeners_grouped_by_port(self) -> None:
+        gateway = load_platform(self.write()).gateway
+        self.assertEqual([(entry.name, entry.port, entry.scope) for entry in gateway.entry_points], [
+            ("port-443", 443, "private"), ("port-8443", 8443, "loopback"),
+        ])
+        self.assertEqual(gateway.url("grafana-gateway"), "https://gateway.nighthawk.internal:443")
+        self.assertEqual(gateway.upstreams["traces.otlp_grpc"], "h2c://tempo:4317")
+
+    def test_shared_listener_takes_its_most_exposed_scope(self) -> None:
+        self.data["gateway"]["entry_points"] = ["grafana-gateway", "remote-gateway"]
+        (entry,) = load_platform(self.write()).gateway.entry_points
+        self.assertEqual((entry.port, entry.scope), (443, "restricted-external"))
+
+    def test_unknown_gateway_entry_point_fails(self) -> None:
+        self.data["gateway"]["entry_points"] = ["backend-object-storage"]
+        self.assert_invalid("entry point 'backend-object-storage' is not a network rule")
+
+    def test_grafana_entry_point_must_be_selected(self) -> None:
+        self.data["gateway"]["grafana_entry_point"] = "remote-gateway"
+        self.assert_invalid("grafana_entry_point 'remote-gateway' is not a selected entry point")
+
+    def test_gateway_upstream_port_must_be_in_the_network_contract(self) -> None:
+        self.data["gateway"]["upstreams"]["logs"] = "http://loki:3101"
+        self.assert_invalid("upstreams.logs port 3101 is not a network rule from gateway to loki")
+
+    def test_gateway_auth_service_port_must_be_in_the_network_contract(self) -> None:
+        self.data["gateway"]["auth_service"] = "http://authz:9999"
+        self.assert_invalid("auth_service port 9999")
+
+    def test_enabled_signal_requires_a_gateway_upstream(self) -> None:
+        del self.data["gateway"]["upstreams"]["profiles"]
+        self.assert_invalid("missing upstreams for enabled signals: profiles")
+
+    def test_malformed_revoked_fingerprint_fails(self) -> None:
+        self.data["gateway"]["revoked_certificate_fingerprints"] = ["AB:CD"]
+        self.assert_invalid("revoked_certificate_fingerprints.0")
+
+    def test_unknown_gateway_ca_fails(self) -> None:
+        self.data["gateway"]["client_ca_secret_ref"] = "missing"
+        self.assert_invalid("unknown secret")
+
+    def test_gateway_ca_cannot_reuse_a_credential_secret(self) -> None:
+        self.data["gateway"]["client_ca_secret_ref"] = "example-ingest"
+        self.assert_invalid("gateway CA references must not reuse")
+
+    def test_metrics_budget_in_bytes_fails_and_names_the_expected_field(self) -> None:
+        metrics = self.data["tenants"][0]["datastreams"][0]["signals"]["metrics"]
+        metrics["ingestion_rate_bytes_per_second"] = metrics.pop("ingestion_rate_samples_per_second")
+        self.assert_invalid("ingestion_rate_samples_per_second")
+
+    def test_unsafe_drop_field_name_fails(self) -> None:
+        self.data["tenants"][0]["datastreams"][0]["collection"]["drop_fields"] = ["pass|word"]
+        self.assert_invalid("drop_fields")
+
+    def test_overlapping_credentials_for_one_pair_are_valid(self) -> None:
+        self.data["secrets"]["example-ingest-next"] = {"file": "secrets/local.sops.yaml", "key": "example-ingest-next"}
+        self.data["credentials"].append({
+            "id": "example-ingest-next", "secret_ref": "example-ingest-next",
+            "tenant": "example", "datastream": "application", "permission": "ingest",
+        })
+        platform = load_platform(self.write())
+        ingest = [item for item in platform.credentials if item.permission == "ingest"]
+        self.assertEqual({item.backend_id for item in ingest}, {"example-application"})
+        self.assertEqual(len(ingest), 2)
+
     def test_backend_id_changes_are_migrations(self) -> None:
         previous = load_platform(self.write())
         self.data["tenants"][0]["datastreams"][0]["backend_id"] = "new-backend"
@@ -317,10 +382,17 @@ class ConfigurationTests(unittest.TestCase):
             self.assertEqual(main(["render-contracts", "--config", str(self.path), "--output", str(second)]), 0)
         self.assertEqual(
             {path.name for path in first.iterdir()},
-            {"platform.json", "network.json", "ports.md", "pyroscope-overrides.yaml"},
+            {
+                "platform.json", "network.json", "ports.md", "unenforced-limits.json", "gateway", "grafana",
+                "mimir-overrides.yaml", "loki-overrides.yaml", "tempo-overrides.yaml", "pyroscope-overrides.yaml",
+            },
         )
-        for path in first.iterdir():
-            self.assertEqual(path.read_bytes(), (second / path.name).read_bytes())
+        rendered = sorted(path.relative_to(first) for path in first.rglob("*") if path.is_file())
+        self.assertIn(Path("gateway/traefik-dynamic.yaml"), rendered)
+        self.assertIn(Path("grafana/desired-state.json"), rendered)
+        self.assertEqual(rendered, sorted(path.relative_to(second) for path in second.rglob("*") if path.is_file()))
+        for path in rendered:
+            self.assertEqual((first / path).read_bytes(), (second / path).read_bytes())
         with redirect_stderr(io.StringIO()) as errors:
             self.assertEqual(main(["render-contracts", "--config", str(self.path), "--output", str(first)]), 1)
         self.assertIn("error:", errors.getvalue())

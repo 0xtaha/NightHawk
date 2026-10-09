@@ -8,8 +8,10 @@ The configuration validator/intermediate renderer, Pyroscope retention fragment,
 SOPS + age secrets lifecycle, AWS storage Terraform modules, the Terraform
 state-bootstrap root, the AWS VPC/EKS compute root, and the self-hosted/Docker
 zero-resource Terraform boundary roots are implemented and locally tested.
-Runtime collection, gateway enforcement, dashboards, alerting, and full
-deployment automation remain planned.
+The Alloy collector configurations, the tenant gateway configuration and auth
+service, per-tenant runtime overrides, and Grafana tenant provisioning are
+implemented and unit-tested, but have not been run against live components.
+Dashboards, alerting, and full deployment automation remain planned.
 
 ## 1. Platform architecture
 
@@ -35,7 +37,8 @@ flowchart TB
 
     subgraph Core["Logical platform - hosted in the selected runtime"]
         Ingress["TLS entry point<br/>Traefik + cert-manager on Kubernetes"]
-        Gateway["Tenant gateway<br/>ingest/query permissions and tenant binding"]
+        Gateway["Tenant gateway (Traefik)<br/>route table, TLS and client certificates"]
+        Authz["NightHawk auth service<br/>credential and certificate to tenant binding"]
         Grafana["Grafana<br/>one organization per customer"]
 
         subgraph Backends["Private signal backends"]
@@ -55,6 +58,7 @@ flowchart TB
     Ingress -->|"telemetry"| Gateway
     Ingress -->|"authenticated UI"| Grafana
     Grafana -->|"organization-scoped query credentials"| Gateway
+    Gateway <-->|"forward-auth decision"| Authz
     Gateway --> Mimir
     Gateway --> Loki
     Gateway --> Tempo
@@ -65,7 +69,7 @@ flowchart TB
     Loki --> StoreBinding
     Tempo --> StoreBinding
     Pyroscope --> StoreBinding
-    Renderer -. "planned policy and provisioning integration" .-> Core
+    Renderer -. "routes, auth policy, overrides,<br/>Grafana desired state, collector configs" .-> Core
 
     subgraph Local["Local deployment - Docker Compose or self-hosted k3s"]
         LocalRuntime["Compose: monolithic, non-HA<br/>k3s: Cilium, MetalLB and Longhorn"]
@@ -105,7 +109,7 @@ flowchart TB
     DockerBoundary -. "applies zero resources; hosts Compose-managed" .-> LocalRuntime
 
     classDef implemented fill:#dbeafe,stroke:#2563eb,color:#172554
-    class Config,Renderer,Terraform,Secrets,StateBootstrap,EKS,IRSA,SelfHostedBoundary,DockerBoundary implemented
+    class Config,Renderer,Terraform,Secrets,StateBootstrap,EKS,IRSA,SelfHostedBoundary,DockerBoundary,Alloy,Gateway,Authz implemented
 ```
 
 **Reading the diagram**

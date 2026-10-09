@@ -1,0 +1,8 @@
+// Applications push profiles here with a Pyroscope SDK.
+pyroscope.receive_http "sdk" {
+	http {
+		listen_address = "0.0.0.0"
+		listen_port    = 4040
+	}
+	forward_to = [pyroscope.relabel.redact.receiver]
+}

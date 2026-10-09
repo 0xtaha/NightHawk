@@ -1,0 +1,12 @@
+// External service: scrape targets listed in a Prometheus file-discovery
+// document. NIGHTHAWK_TARGETS_FILE is the path (or glob) of that document.
+// Logs and traces from external services arrive through the OTLP receiver.
+discovery.file "targets" {
+	files = [sys.env("NIGHTHAWK_TARGETS_FILE")]
+}
+
+prometheus.scrape "targets" {
+	targets    = discovery.file.targets.targets
+	job_name   = "external-service"
+	forward_to = [prometheus.relabel.redact.receiver]
+}

@@ -2,15 +2,24 @@
 
 ## Status
 
-The Python CLI validates and renders **non-secret intermediate contracts**.
-It also emits a version-gated Pyroscope v2 retention override fragment.
-It implements the full SOPS + age secrets lifecycle (recipient generation,
-encryption, rotation, materialization, cleanup) gated on a `doctor`
-prerequisite check, and a `check-pins` drift check against the compatibility
-matrix. It does not yet deploy the platform, generate complete backend-native
-configuration, enforce gateway authentication, or implement redaction.
-The initial network contract contains shared entry points, not a complete
-Kubernetes or host firewall. Do not deploy it as a complete allowlist.
+The Python CLI validates and renders **non-secret intermediate contracts**:
+the platform and network manifests, version-gated per-tenant runtime overrides
+for all four backends, the Traefik gateway configuration, and the Grafana
+desired state. Separate commands render a collector configuration with
+collection-time redaction, render the gateway auth policy from materialized
+secrets, run the auth service, manage gateway credentials and certificates,
+and provision Grafana. It implements the full SOPS + age secrets lifecycle
+gated on a `doctor` prerequisite check, and a `check-pins` drift check against
+the compatibility matrix.
+
+It does not deploy the platform or generate backend static configuration.
+Gateway enforcement, redaction, and retention are verified by unit tests and
+static checks only; none has been observed against running components. See
+[collection](04-collection.md), [gateway](05-gateway.md), and
+[tenant provisioning](06-tenant-provisioning.md).
+The network contract covers the gateway entry points and the flows behind the
+gateway, not a complete Kubernetes or host firewall. Do not deploy it as a
+complete allowlist.
 
 ## Prerequisites
 
@@ -41,8 +50,12 @@ retention**, not production defaults.
 - IDs use lowercase ASCII letters, digits, and hyphens. Backend IDs are globally
   unique; do not derive ambiguous concatenations at runtime.
 - Each enabled signal explicitly supplies whole-hour retention, an ingestion
-  byte-rate budget, and a query concurrency budget. These are platform policy
-  inputs, not yet translated into backend-native units or runtime limits.
+  budget, and a query concurrency budget. Logs, traces, and profiles declare
+  `ingestion_rate_bytes_per_second`. Metrics declare
+  `ingestion_rate_samples_per_second` instead, because Mimir enforces a
+  per-tenant sample rate and has no per-tenant byte rate; a byte-based metrics
+  budget is rejected. See [tenant provisioning](06-tenant-provisioning.md) for
+  how each value becomes a backend override.
 - Zero/unbounded retention is not accepted. Loki requires at least 24 hours;
   all durations must fit Go's signed duration representation. Version-specific
   runtime validation and deletion tests remain necessary.
@@ -52,7 +65,33 @@ retention**, not production defaults.
   `spiffe://nighthawk/<tenant>/<datastream>/<collector>`. The contract checks
   mapping consistency, not actual certificate validity or revocation.
 - Collection policy approval and an explicit field-drop list are required.
-  A field list alone is not evidence that telemetry has been sanitized.
+  Drop-field names are limited to ASCII letters, digits, `_`, `.`, and `-`
+  because they are placed in collector regular expressions. A field list alone
+  is not evidence that telemetry has been sanitized.
+- Several credentials may be declared for the same tenant/datastream and
+  permission. That is how a gateway credential is rotated without a gap.
+
+### Gateway block
+
+The required `gateway` object describes the single authenticated entry point.
+Every address is explicit; nothing is derived from `deployment`.
+
+| Field | Meaning |
+| --- | --- |
+| `hostname` | DNS name collectors and Grafana data sources use; also the gateway server certificate's name |
+| `entry_points` | IDs of `config/network.yaml` rules whose destination is `gateway`. The gateway listens on exactly their ports. Rules sharing a port share one listener, which takes the most exposed scope among them |
+| `grafana_entry_point` | The selected entry point Grafana data sources connect to |
+| `client_ca_secret_ref` | Secret holding the CA certificate that verifies collector certificates |
+| `client_ca_key_secret_ref` | Optional. Secret holding that CA's private key, only for a locally managed CA |
+| `auth_service` | Private address of the NightHawk auth service that Traefik calls |
+| `upstreams` | Backend addresses per signal: `metrics`, `logs`, `profiles`, and for `traces` the `query`, `otlp_grpc`, and `otlp_http` addresses. Required for every signal any datastream enables |
+| `revoked_certificate_fingerprints` | Lowercase hex SHA-256 fingerprints of collector certificates the gateway must refuse |
+
+Upstream and auth-service ports must match a network rule from `gateway` to
+that component (`mimir`, `loki`, `tempo`, `pyroscope`, `auth-service`), so the
+network contract stays the single owner of ports. `http://` upstreams are
+plaintext links and must stay on a private network; see
+[gateway](05-gateway.md).
 
 Secret references point to SOPS-encrypted files under `secrets/`; no decryption
 occurs during contract validation. Actual encrypted files, age recipients,
@@ -111,8 +150,10 @@ they do not prove real AWS access or retention enforcement.
 .\.venv\Scripts\python.exe -m nighthawk render-contracts --config config\tenants.example.yaml --output .generated\contracts
 ```
 
-This produces `platform.json`, `network.json`, `ports.md`, and
-`pyroscope-overrides.yaml`. The latter uses the approved Pyroscope 2.3.1 v2
+This produces `platform.json`, `network.json`, `ports.md`, one
+`<backend>-overrides.yaml` per signal backend, `unenforced-limits.json`,
+`gateway/` (Traefik configuration and route table), and
+`grafana/desired-state.json`. `pyroscope-overrides.yaml` uses the approved Pyroscope 2.3.1 v2
 `retention_period` field, without a default retention or overrides for disabled
 profiling streams. A version/storage-mode/field change fails until its
 compatibility is explicitly reviewed. The fragment still requires a configured
@@ -187,12 +228,12 @@ recipients recorded in `.generated/age-recipients.local.json` unless
 explicit, non-empty recipient list.
 
 `nighthawk check-pins` compares each `tracked_consumers` entry in
-`config/versions.yaml` (currently both Terraform `versions.tf` files) against
+`config/versions.yaml` (the Terraform version files and the Alloy sources README) against
 the matrix pins and reports any divergence:
 
 ```console
 $ python -m nighthawk check-pins
-All 4 tracked consumer(s) match the compatibility matrix.
+All 19 tracked consumer(s) match the compatibility matrix.
 ```
 
 ## Troubleshooting and cleanup

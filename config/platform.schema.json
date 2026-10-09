@@ -3,11 +3,12 @@
   "$id": "urn:nighthawk:platform:1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "deployment", "profile", "storage", "secrets", "credentials", "tenants"],
+  "required": ["schema_version", "deployment", "profile", "gateway", "storage", "secrets", "credentials", "tenants"],
   "properties": {
     "schema_version": {"const": 1},
     "deployment": {"enum": ["docker", "self-hosted-k8s", "aws"]},
     "profile": {"enum": ["development", "production"]},
+    "gateway": {"$ref": "#/$defs/gateway"},
     "storage": {"$ref": "#/$defs/storage"},
     "secrets": {
       "type": "object",
@@ -64,7 +65,7 @@
                   "minProperties": 1,
                   "additionalProperties": false,
                   "properties": {
-                    "metrics": {"$ref": "#/$defs/signal"},
+                    "metrics": {"$ref": "#/$defs/metrics_signal"},
                     "logs": {"$ref": "#/$defs/signal"},
                     "traces": {"$ref": "#/$defs/signal"},
                     "profiles": {"$ref": "#/$defs/signal"}
@@ -80,7 +81,7 @@
                       "type": "array",
                       "minItems": 1,
                       "uniqueItems": true,
-                      "items": {"type": "string", "minLength": 1}
+                      "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$"}
                     },
                     "allow_privileged_profiling": {"type": "boolean"}
                   }
@@ -102,6 +103,55 @@
         "retention": {"type": "string", "maxLength": 8, "pattern": "^[1-9][0-9]*h$"},
         "ingestion_rate_bytes_per_second": {"type": "integer", "minimum": 1},
         "query_concurrency": {"type": "integer", "minimum": 1}
+      }
+    },
+    "metrics_signal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["retention", "ingestion_rate_samples_per_second", "query_concurrency"],
+      "properties": {
+        "retention": {"type": "string", "maxLength": 8, "pattern": "^[1-9][0-9]*h$"},
+        "ingestion_rate_samples_per_second": {"type": "integer", "minimum": 1},
+        "query_concurrency": {"type": "integer", "minimum": 1}
+      }
+    },
+    "origin": {"type": "string", "pattern": "^https?://[a-z0-9]([a-z0-9.-]*[a-z0-9])?:[0-9]{1,5}$"},
+    "gateway": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hostname", "entry_points", "grafana_entry_point", "client_ca_secret_ref", "auth_service", "upstreams", "revoked_certificate_fingerprints"],
+      "properties": {
+        "hostname": {"type": "string", "maxLength": 253, "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$"},
+        "entry_points": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "grafana_entry_point": {"$ref": "#/$defs/id"},
+        "client_ca_secret_ref": {"$ref": "#/$defs/id"},
+        "client_ca_key_secret_ref": {"$ref": "#/$defs/id"},
+        "auth_service": {"$ref": "#/$defs/origin"},
+        "upstreams": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "metrics": {"$ref": "#/$defs/origin"},
+            "logs": {"$ref": "#/$defs/origin"},
+            "traces": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["query", "otlp_grpc", "otlp_http"],
+              "properties": {
+                "query": {"$ref": "#/$defs/origin"},
+                "otlp_grpc": {"type": "string", "pattern": "^(h2c|https)://[a-z0-9]([a-z0-9.-]*[a-z0-9])?:[0-9]{1,5}$"},
+                "otlp_http": {"$ref": "#/$defs/origin"}
+              }
+            },
+            "profiles": {"$ref": "#/$defs/origin"}
+          }
+        },
+        "revoked_certificate_fingerprints": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
       }
     },
     "storage": {

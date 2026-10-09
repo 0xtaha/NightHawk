@@ -1,0 +1,83 @@
+// Kubernetes cluster (Deployment or StatefulSet): cluster-scoped sources only.
+// Node-local sources belong to the k8s-node profile. Replicas share targets
+// when Alloy runs with --cluster.enabled; all replicas must use this same
+// configuration. kube-state-metrics must already be installed.
+discovery.kubernetes "endpoints" {
+	role = "endpointslice"
+}
+
+discovery.relabel "kube_state_metrics" {
+	targets = discovery.kubernetes.endpoints.targets
+
+	rule {
+		source_labels = ["__meta_kubernetes_service_label_app_kubernetes_io_name"]
+		regex         = "kube-state-metrics"
+		action        = "keep"
+	}
+}
+
+prometheus.scrape "kube_state_metrics" {
+	targets    = discovery.relabel.kube_state_metrics.output
+	job_name   = "kube-state-metrics"
+	forward_to = [prometheus.relabel.redact.receiver]
+
+	clustering {
+		enabled = true
+	}
+}
+
+discovery.relabel "annotated_services" {
+	targets = discovery.kubernetes.endpoints.targets
+
+	rule {
+		source_labels = ["__meta_kubernetes_service_annotation_prometheus_io_scrape"]
+		regex         = "true"
+		action        = "keep"
+	}
+
+	rule {
+		source_labels = ["__meta_kubernetes_namespace"]
+		target_label  = "namespace"
+	}
+
+	rule {
+		source_labels = ["__meta_kubernetes_service_name"]
+		target_label  = "service"
+	}
+}
+
+prometheus.scrape "annotated_services" {
+	targets    = discovery.relabel.annotated_services.output
+	job_name   = "annotated-services"
+	forward_to = [prometheus.relabel.redact.receiver]
+
+	clustering {
+		enabled = true
+	}
+}
+
+discovery.relabel "apiserver" {
+	targets = discovery.kubernetes.endpoints.targets
+
+	rule {
+		source_labels = ["__meta_kubernetes_namespace", "__meta_kubernetes_service_name", "__meta_kubernetes_endpointslice_port_name"]
+		regex         = "default;kubernetes;https"
+		action        = "keep"
+	}
+}
+
+prometheus.scrape "apiserver" {
+	targets           = discovery.relabel.apiserver.output
+	job_name          = "apiserver"
+	scheme            = "https"
+	bearer_token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	forward_to        = [prometheus.relabel.redact.receiver]
+
+	tls_config {
+		ca_file = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+	}
+
+	clustering {
+		enabled = true
+	}
+}

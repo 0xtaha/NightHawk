@@ -1,0 +1,57 @@
+// Remote Kubernetes cluster: one self-contained, API-only collector (no
+// DaemonSet and no host mounts). Do not combine it with the k8s-node or
+// k8s-cluster profiles for the same cluster. kube-state-metrics must already
+// be installed.
+discovery.kubernetes "endpoints" {
+	role = "endpointslice"
+}
+
+discovery.relabel "kube_state_metrics" {
+	targets = discovery.kubernetes.endpoints.targets
+
+	rule {
+		source_labels = ["__meta_kubernetes_service_label_app_kubernetes_io_name"]
+		regex         = "kube-state-metrics"
+		action        = "keep"
+	}
+}
+
+prometheus.scrape "kube_state_metrics" {
+	targets    = discovery.relabel.kube_state_metrics.output
+	job_name   = "kube-state-metrics"
+	forward_to = [prometheus.relabel.redact.receiver]
+
+	clustering {
+		enabled = true
+	}
+}
+
+discovery.relabel "annotated_services" {
+	targets = discovery.kubernetes.endpoints.targets
+
+	rule {
+		source_labels = ["__meta_kubernetes_service_annotation_prometheus_io_scrape"]
+		regex         = "true"
+		action        = "keep"
+	}
+
+	rule {
+		source_labels = ["__meta_kubernetes_namespace"]
+		target_label  = "namespace"
+	}
+
+	rule {
+		source_labels = ["__meta_kubernetes_service_name"]
+		target_label  = "service"
+	}
+}
+
+prometheus.scrape "annotated_services" {
+	targets    = discovery.relabel.annotated_services.output
+	job_name   = "annotated-services"
+	forward_to = [prometheus.relabel.redact.receiver]
+
+	clustering {
+		enabled = true
+	}
+}

@@ -1,0 +1,36 @@
+// Privileged eBPF profiling for Kubernetes nodes. Run this as its own
+// collector: it needs root in the host PID namespace (privileged, or the
+// capabilities listed in docs/04-collection.md). It is rendered only for a
+// datastream that sets allow_privileged_profiling: true.
+discovery.kubernetes "ebpf_node_pods" {
+	role = "pod"
+
+	selectors {
+		role  = "pod"
+		field = "spec.nodeName=" + coalesce(sys.env("HOSTNAME"), constants.hostname)
+	}
+}
+
+discovery.relabel "ebpf_pods" {
+	targets = discovery.kubernetes.ebpf_node_pods.targets
+
+	rule {
+		source_labels = ["__meta_kubernetes_namespace"]
+		target_label  = "namespace"
+	}
+
+	rule {
+		source_labels = ["__meta_kubernetes_pod_name"]
+		target_label  = "pod"
+	}
+
+	rule {
+		source_labels = ["__meta_kubernetes_pod_container_name"]
+		target_label  = "container"
+	}
+}
+
+pyroscope.ebpf "node" {
+	targets    = discovery.relabel.ebpf_pods.output
+	forward_to = [pyroscope.relabel.redact.receiver]
+}

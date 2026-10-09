@@ -1,0 +1,7 @@
+// Kubernetes cluster: Kubernetes events as logs. Pod logs belong to the
+// k8s-node profile.
+loki.source.kubernetes_events "cluster" {
+	job_name   = "kubernetes-events"
+	log_format = "json"
+	forward_to = [loki.relabel.redact.receiver]
+}

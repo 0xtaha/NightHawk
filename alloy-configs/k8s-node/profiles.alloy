@@ -1,0 +1,43 @@
+// Kubernetes node (DaemonSet): pprof scraping of pods on this node that opt in
+// with the profiles.grafana.com/cpu.scrape annotation. Unprivileged.
+discovery.kubernetes "node_profiled_pods" {
+	role = "pod"
+
+	selectors {
+		role  = "pod"
+		field = "spec.nodeName=" + coalesce(sys.env("HOSTNAME"), constants.hostname)
+	}
+}
+
+discovery.relabel "profiled_pods" {
+	targets = discovery.kubernetes.node_profiled_pods.targets
+
+	rule {
+		source_labels = ["__meta_kubernetes_pod_annotation_profiles_grafana_com_cpu_scrape"]
+		regex         = "true"
+		action        = "keep"
+	}
+
+	rule {
+		source_labels = ["__meta_kubernetes_namespace"]
+		target_label  = "namespace"
+	}
+
+	rule {
+		source_labels = ["__meta_kubernetes_pod_name"]
+		target_label  = "pod"
+	}
+
+	rule {
+		source_labels = ["__address__", "__meta_kubernetes_pod_annotation_profiles_grafana_com_cpu_port"]
+		regex         = "([^:]+)(?::[0-9]+)?;([0-9]+)"
+		replacement   = "$1:$2"
+		target_label  = "__address__"
+	}
+}
+
+pyroscope.scrape "pods" {
+	targets    = discovery.relabel.profiled_pods.output
+	job_name   = "pod-profiles"
+	forward_to = [pyroscope.relabel.redact.receiver]
+}

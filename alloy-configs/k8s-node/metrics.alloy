@@ -1,0 +1,44 @@
+// Kubernetes node (DaemonSet): node-local sources only. Everything here is
+// restricted to the node this collector runs on; cluster-scoped sources belong
+// to the k8s-cluster profile. HOSTNAME must be the node name.
+discovery.kubernetes "node" {
+	role = "node"
+
+	selectors {
+		role  = "node"
+		field = "metadata.name=" + coalesce(sys.env("HOSTNAME"), constants.hostname)
+	}
+}
+
+prometheus.scrape "kubelet" {
+	targets           = discovery.kubernetes.node.targets
+	job_name          = "kubelet"
+	scheme            = "https"
+	bearer_token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	forward_to        = [prometheus.relabel.redact.receiver]
+
+	tls_config {
+		ca_file = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+	}
+}
+
+prometheus.scrape "cadvisor" {
+	targets           = discovery.kubernetes.node.targets
+	job_name          = "cadvisor"
+	scheme            = "https"
+	metrics_path      = "/metrics/cadvisor"
+	bearer_token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	forward_to        = [prometheus.relabel.redact.receiver]
+
+	tls_config {
+		ca_file = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+	}
+}
+
+prometheus.exporter.unix "node" { }
+
+prometheus.scrape "node" {
+	targets    = prometheus.exporter.unix.node.targets
+	job_name   = "node"
+	forward_to = [prometheus.relabel.redact.receiver]
+}

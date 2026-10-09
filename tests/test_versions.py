@@ -87,6 +87,17 @@ class VersionsTests(unittest.TestCase):
         with self.assertRaises(ConfigurationError):
             load_versions(self.write(document))
 
+    def test_collectors_pin_alloy(self) -> None:
+        alloy = load_versions()["collectors"]["alloy"]
+        self.assertTrue(alloy["version"])
+        self.assertTrue(alloy["source"])
+
+    def test_load_versions_rejects_missing_alloy_pin(self) -> None:
+        document = copy.deepcopy(self.matrix)
+        del document["collectors"]["alloy"]
+        with self.assertRaises(ConfigurationError):
+            load_versions(self.write(document))
+
     def test_check_pins_matches_tracked_consumers(self) -> None:
         self.assertEqual(check_pins(load_versions()), [])
 

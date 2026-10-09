@@ -102,6 +102,11 @@ grafana_charts:
     app_version: 2.3.1
     source: https://artifacthub.io/packages/helm/grafana/pyroscope
     runtime_verified: false
+collectors:
+  alloy:
+    version: 1.20.1
+    source: https://github.com/grafana/alloy/releases/tag/v1.20.1
+    runtime_verified: false
 validation_tools:
   terraform:
     version: 1.13.5
@@ -188,3 +193,6 @@ tracked_consumers:
   - path: terraform/environments/docker/main.tf
     pattern: '(?m)^\s*version\s*=\s*"=\s*([0-9.]+)"'
     component: validation_tools.aws_provider.version
+  - path: alloy-configs/README.md
+    pattern: 'Pinned Alloy version: `([0-9.]+)`'
+    component: collectors.alloy.version

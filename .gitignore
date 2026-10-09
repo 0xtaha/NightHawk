@@ -20,3 +20,4 @@ secrets/*
 *.pem
 *.key
 !*.example
+.tools/

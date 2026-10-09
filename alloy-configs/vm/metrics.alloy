@@ -1,0 +1,8 @@
+// Virtual machine: host metrics.
+prometheus.exporter.unix "host" { }
+
+prometheus.scrape "host" {
+	targets    = prometheus.exporter.unix.host.targets
+	job_name   = "node"
+	forward_to = [prometheus.relabel.redact.receiver]
+}

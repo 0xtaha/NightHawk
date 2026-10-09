@@ -79,7 +79,20 @@ pairs, separates ingestion from query privileges, and rejects missing, unknown,
 conflicting, or spoofed tenant headers. Raw ingestion and query endpoints are
 never published directly.
 
-Each customer has a Grafana organization. Each datastream has independently
+The gateway is implemented as Traefik plus a NightHawk forward-auth service.
+Traefik terminates TLS, verifies a client certificate when one is presented,
+and routes only the paths in a single route table; there is no catch-all
+route, so backend administrative, deletion, and rule-management endpoints are
+unreachable. For every routed request it asks the auth service, which derives
+the backend tenant ID from the credential and returns it as `X-Scope-OrgID`.
+A client may omit that header; a supplied header must equal the bound ID. The
+auth service must be reachable only from Traefik. See
+[gateway](05-gateway.md) for the decision order, the trust lifecycle, and
+what has not yet been observed at runtime.
+
+Each customer has a Grafana organization, created and reconciled through
+Grafana's HTTP API by `nighthawk provision-grafana`
+([tenant provisioning](06-tenant-provisioning.md)). Each datastream has independently
 provisioned data sources and a stable backend tenant ID. Dashboards, alerting,
 and source credentials are organization-scoped. Anonymous access and cross-tenant
 query federation are disabled. A Grafana platform administrator is a trusted
@@ -98,11 +111,20 @@ inputs. It validates platform, tenant, version, and network contracts before
 producing backend settings, tenant overrides, gateway routes, Grafana
 provisioning, and host/infrastructure inputs.
 
+Implemented outputs: per-tenant runtime overrides for Mimir, Loki, Tempo, and
+Pyroscope; the Traefik gateway configuration and route table; the Grafana
+desired state; one collector configuration per datastream and profile; and,
+as a separate secret-bearing step, the gateway auth policy. Backend static
+configuration and host/infrastructure inputs are not rendered yet.
+
 Each tenant/datastream pair declares:
 
 - A stable globally unique backend ID, distinct from display names.
 - Enabled signals and explicit retention for every enabled signal.
-- Ingestion/query limits and approved collection/redaction policy.
+- Ingestion/query limits and approved collection/redaction policy. The
+  ingestion budget is enforced by every backend. `query_concurrency` is not
+  enforceable per tenant by any pinned backend and is reported as unenforced
+  rather than rendered.
 - Credential references with permissions limited to authorized backend IDs.
 
 Changing a backend ID is a data migration, not a rename. Validation rejects
@@ -194,6 +216,14 @@ queues and retries and expose collector/backend self-monitoring. Keep optional
 privileged/eBPF profiling separate from minimally privileged collection.
 Application SDKs, kube-state-metrics, and device exporters remain necessary
 where Alloy cannot collect a signal itself.
+
+A collector serves exactly one datastream. `alloy-configs/<profile>/` holds
+hand-written sources that forward only to fixed redaction receivers;
+`nighthawk render-collector` adds the generated OTLP receiver, redaction, and
+gateway delivery for one datastream, so nothing reaches the gateway without
+passing redaction. The collector authenticates with its datastream's
+ingestion credential and never sets a tenant header. See
+[collection](04-collection.md).
 
 Apply verified collection-time redaction to logs, OTLP/resource attributes,
 and metric labels. Drop sensitive data by default. Document limits of hashing

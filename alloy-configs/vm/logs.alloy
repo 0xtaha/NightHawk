@@ -1,0 +1,14 @@
+// Virtual machine: systemd journal and plain log files.
+loki.source.journal "system" {
+	labels     = {job = "journal"}
+	forward_to = [loki.relabel.redact.receiver]
+}
+
+local.file_match "varlog" {
+	path_targets = [{__path__ = "/var/log/*.log", job = "varlog"}]
+}
+
+loki.source.file "varlog" {
+	targets    = local.file_match.varlog.targets
+	forward_to = [loki.relabel.redact.receiver]
+}

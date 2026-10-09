@@ -1,0 +1,20 @@
+// Docker host: host and container resource metrics. Needs the Docker socket and
+// host mounts required by the cAdvisor exporter.
+prometheus.exporter.unix "host" { }
+
+prometheus.scrape "host" {
+	targets    = prometheus.exporter.unix.host.targets
+	job_name   = "node"
+	forward_to = [prometheus.relabel.redact.receiver]
+}
+
+prometheus.exporter.cadvisor "containers" {
+	docker_host = "unix:///var/run/docker.sock"
+	docker_only = true
+}
+
+prometheus.scrape "containers" {
+	targets    = prometheus.exporter.cadvisor.containers.targets
+	job_name   = "cadvisor"
+	forward_to = [prometheus.relabel.redact.receiver]
+}
