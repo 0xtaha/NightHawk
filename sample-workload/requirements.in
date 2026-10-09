@@ -1,0 +1,6 @@
+# Direct dependencies of the sample workload. requirements.txt is the full pinned set
+# (pip freeze of a clean install of these on Python 3.12).
+opentelemetry-sdk==1.45.1
+opentelemetry-exporter-otlp-proto-http==1.45.1
+pyroscope-io==1.2.5
+pyroscope-otel==1.1.0

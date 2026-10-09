@@ -9,6 +9,7 @@ import secrets as token_source
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import yaml
 from cryptography import x509
@@ -85,6 +86,36 @@ def generate_credential(
     )
 
 
+def storage_identity_refs(platform: Platform) -> list[str]:
+    return sorted({
+        binding.identity.ref for binding in platform.bindings.values() if binding.identity.type == "secret"
+    })
+
+
+def generate_storage_identity(
+    platform: Platform, identity_ref: str, recipients: list[str], *, root: Path = ROOT,
+    confirm_production_recipients: bool = False, runner: Runner = subprocess.run,
+) -> Path:
+    """Create an S3 access key and secret key for a declared local storage identity."""
+    if identity_ref not in storage_identity_refs(platform):
+        raise ConfigurationError(f"{identity_ref!r} is not a storage identity of this platform document")
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    value = json.dumps({
+        "access_key": "".join(token_source.choice(alphabet) for _ in range(20)),
+        "secret_key": token_source.token_urlsafe(30),
+    }, sort_keys=True)
+    return store_new_secret(
+        platform.secrets[identity_ref], value, recipients, root=root, profile=platform.profile,
+        confirm_production_recipients=confirm_production_recipients, runner=runner,
+    )
+
+
+def storage_hostnames(platform: Platform) -> list[str]:
+    if platform.storage_provider != "seaweedfs":
+        raise ConfigurationError("a storage server certificate is issued only for local SeaweedFS bindings")
+    return sorted({urlsplit(binding.endpoint).hostname or "" for binding in platform.bindings.values()})
+
+
 def _validity(valid_days: int) -> tuple[datetime.datetime, datetime.datetime]:
     if isinstance(valid_days, bool) or not isinstance(valid_days, int) or valid_days < 1:
         raise ConfigurationError("an explicit validity of at least one day is required")
@@ -151,24 +182,32 @@ class IssuedCertificate:
 
 def issue_certificate(
     platform: Platform, output_dir: Path, valid_days: int | None, *, credential_id: str | None = None,
-    server: bool = False, root: Path = ROOT, runner: Runner = subprocess.run,
+    server: bool = False, storage: bool = False, root: Path = ROOT, runner: Runner = subprocess.run,
 ) -> IssuedCertificate:
-    """Issue a collector client certificate for a declared identity, or the gateway server certificate."""
-    if server == (credential_id is not None):
-        raise ConfigurationError("choose exactly one of a credential or the gateway server certificate")
+    """Issue a collector client certificate, the gateway server certificate, or the storage server certificate."""
+    if (credential_id is not None) + server + storage != 1:
+        raise ConfigurationError("choose exactly one of a credential, the gateway server, or the storage server")
     if valid_days is None:
         raise ConfigurationError("an explicit validity period is required; there is no default")
     gateway = platform.gateway
     if server:
+        # One certificate for both names served by the gateway listener.
         stem, common_name = "gateway-server", gateway.hostname
-        alternative_name: x509.GeneralName = x509.DNSName(gateway.hostname)
+        alternative_names: list[x509.GeneralName] = [
+            x509.DNSName(gateway.hostname), x509.DNSName(platform.grafana.hostname),
+        ]
+        usage = ExtendedKeyUsageOID.SERVER_AUTH
+    elif storage:
+        hostnames = storage_hostnames(platform)
+        stem, common_name = "storage-server", hostnames[0]
+        alternative_names = [x509.DNSName(name) for name in hostnames]
         usage = ExtendedKeyUsageOID.SERVER_AUTH
     else:
         credential = next((item for item in platform.credentials if item.id == credential_id), None)
         if credential is None or credential.certificate_identity is None:
             raise ConfigurationError(f"{credential_id!r} is not a credential that declares a certificate identity")
         stem, common_name = credential.id, credential.certificate_identity.rsplit("/", 1)[1]
-        alternative_name = x509.UniformResourceIdentifier(credential.certificate_identity)
+        alternative_names = [x509.UniformResourceIdentifier(credential.certificate_identity)]
         usage = ExtendedKeyUsageOID.CLIENT_AUTH
     certificate_path, key_path = output_dir / f"{stem}.crt.pem", output_dir / f"{stem}.key.pem"
     for path in (certificate_path, key_path):
@@ -200,7 +239,7 @@ def issue_certificate(
             key_agreement=False, key_cert_sign=False, crl_sign=False, encipher_only=False, decipher_only=False,
         ), critical=True)
         .add_extension(x509.ExtendedKeyUsage([usage]), critical=False)
-        .add_extension(x509.SubjectAlternativeName([alternative_name]), critical=False)
+        .add_extension(x509.SubjectAlternativeName(alternative_names), critical=False)
         .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_certificate.public_key()), critical=False)
         .sign(ca_key, hashes.SHA256())
     )

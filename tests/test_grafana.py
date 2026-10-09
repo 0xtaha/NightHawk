@@ -41,10 +41,13 @@ class FakeGrafana:
             return 200, {"orgId": org, "message": "Organization created"}
         store = self.datasources[org_id]
         if (method, path) == ("GET", "/api/datasources"):
-            return 200, [dict(item) for item in store.values()]
+            # Like Grafana 13.2.3, the list leaves out basicAuthUser.
+            return 200, [{key: value for key, value in item.items() if key != "basicAuthUser"} for item in store.values()]
         if (method, path) == ("POST", "/api/datasources"):
             return self._save(store, body)
         uid = path.rsplit("/", 1)[1]
+        if method == "GET":
+            return (200, dict(store[uid])) if uid in store else (404, {"message": "Data source not found"})
         if method == "PUT":
             return self._save(store, body)
         if method == "DELETE":

@@ -48,7 +48,8 @@ class OverridesTests(unittest.TestCase):
             "retention_period": "48h", "ingestion_rate_mb": 3.0,
         })
         self.assertEqual(documents["tempo"]["overrides"]["second-infrastructure"], {
-            "compaction": {"block_retention": "24h"}, "ingestion": {"rate_limit_bytes": 5000},
+            "compaction": {"block_retention": "24h"},
+            "ingestion": {"rate_limit_bytes": 5000, "burst_size_bytes": 5000},
         })
         self.assertEqual(documents["pyroscope"]["overrides"]["second-infrastructure"], {
             "retention_period": "96h", "ingestion_rate_mb": 0.5,

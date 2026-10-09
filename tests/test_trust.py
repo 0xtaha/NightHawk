@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import dataclasses
 import datetime
+import json
 import functools
 import io
 import tempfile
@@ -17,7 +19,9 @@ from nighthawk.__main__ import main
 from nighthawk.authz import RequestFacts, certificate_fingerprint, certificate_from_header, decide, parse_policy
 from nighthawk.config import ConfigurationError, load_platform
 from nighthawk.gateway import policy_bundle
-from nighthawk.trust import generate_credential, init_ca, issue_certificate, secret_key_exists
+from nighthawk.trust import (
+    generate_credential, generate_storage_identity, init_ca, issue_certificate, secret_key_exists,
+)
 from tests.fakes import (
     add_stream, basic, example_document, fake_sops, forwarded_certificate, materialize_plain, write_document,
 )
@@ -101,6 +105,44 @@ class GenerateCredentialTests(TrustFixture):
         self.assertFalse((self.root / "secrets").exists())
 
 
+class StorageIdentityTests(TrustFixture):
+    def test_declared_identity_is_stored_as_access_and_secret_key(self) -> None:
+        generate_storage_identity(self.platform, "mimir-storage", RECIPIENTS, root=self.root, runner=fake_sops)
+        value = json.loads(self.stored()["mimir-storage"])
+        self.assertEqual(sorted(value), ["access_key", "secret_key"])
+        self.assertRegex(value["access_key"], r"^[A-Z0-9]{20}$")
+        self.assertGreaterEqual(len(value["secret_key"]), 40)
+        generate_storage_identity(self.platform, "loki-storage", [], root=self.root, runner=fake_sops)
+        self.assertNotEqual(json.loads(self.stored()["loki-storage"]), value)
+
+    def test_existing_value_is_not_replaced(self) -> None:
+        generate_storage_identity(self.platform, "mimir-storage", RECIPIENTS, root=self.root, runner=fake_sops)
+        before = self.stored()
+        with self.assertRaisesRegex(ConfigurationError, "already holds a value"):
+            generate_storage_identity(self.platform, "mimir-storage", RECIPIENTS, root=self.root, runner=fake_sops)
+        self.assertEqual(self.stored(), before)
+
+    def test_secret_that_is_not_a_storage_identity_is_refused(self) -> None:
+        for reference in ("example-ingest", "storage-ca", "nobody"):
+            with self.assertRaisesRegex(ConfigurationError, "is not a storage identity"):
+                generate_storage_identity(self.platform, reference, RECIPIENTS, root=self.root, runner=fake_sops)
+        self.assertFalse((self.root / "secrets").exists())
+
+    def test_keys_are_never_printed(self) -> None:
+        config = write_document(self.root, self.data)
+        through_fake = functools.partial(generate_storage_identity, runner=fake_sops)
+        output = io.StringIO()
+        with mock.patch("nighthawk.__main__.ensure_doctor_ok"), \
+                mock.patch("nighthawk.__main__.trust.generate_storage_identity", through_fake), redirect_stdout(output):
+            self.assertEqual(main([
+                "generate-storage-identity", "--config", str(config), "--identity", "tempo-storage",
+                "--recipient", "age1recipient", "--root", str(self.root),
+            ]), 0)
+        value = json.loads(self.stored()["tempo-storage"])
+        self.assertNotIn(value["access_key"], output.getvalue())
+        self.assertNotIn(value["secret_key"], output.getvalue())
+
+
 class CertificateAuthorityTests(TrustFixture):
     def test_development_ca_is_stored_encrypted_at_both_references(self) -> None:
         fingerprint = init_ca(self.platform, RECIPIENTS, 30, root=self.root, runner=fake_sops)
@@ -163,9 +205,29 @@ class IssueCertificateTests(TrustFixture):
         issued = issue_certificate(self.platform, self.output, 7, server=True, root=self.root, runner=fake_sops)
         certificate = x509.load_pem_x509_certificate(issued.certificate_path.read_bytes())
         names = certificate.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
-        self.assertEqual(names.get_values_for_type(x509.DNSName), ["gateway.nighthawk.internal"])
+        self.assertEqual(
+            names.get_values_for_type(x509.DNSName), ["gateway.nighthawk.internal", "grafana.nighthawk.internal"],
+        )
+        self.assertEqual(len(list(names)), 2)
         usage = certificate.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
         self.assertEqual(list(usage), [ExtendedKeyUsageOID.SERVER_AUTH])
+
+    def test_storage_certificate_is_for_the_binding_endpoint_hostnames_only(self) -> None:
+        issued = issue_certificate(self.platform, self.output, 7, storage=True, root=self.root, runner=fake_sops)
+        self.assertEqual(issued.certificate_path.name, "storage-server.crt.pem")
+        certificate = x509.load_pem_x509_certificate(issued.certificate_path.read_bytes())
+        names = certificate.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+        self.assertEqual(names.get_values_for_type(x509.DNSName), ["seaweedfs"])
+        self.assertEqual(len(list(names)), 1)
+        usage = certificate.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
+        self.assertEqual(list(usage), [ExtendedKeyUsageOID.SERVER_AUTH])
+
+    def test_storage_certificate_is_refused_for_cloud_storage(self) -> None:
+        platform = dataclasses.replace(self.platform, storage_provider="aws")
+        with self.assertRaisesRegex(ConfigurationError, "only for local SeaweedFS bindings"):
+            issue_certificate(platform, self.output, 7, storage=True, root=self.root, runner=fake_sops)
+        with self.assertRaisesRegex(ConfigurationError, "exactly one"):
+            issue_certificate(self.platform, self.output, 7, server=True, storage=True, root=self.root, runner=fake_sops)
 
     def test_undeclared_identity_missing_validity_and_overwrite_fail(self) -> None:
         for credential in ("example-query", "nobody"):

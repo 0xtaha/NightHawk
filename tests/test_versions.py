@@ -69,6 +69,7 @@ class VersionsTests(unittest.TestCase):
 
     def test_pin_change_allows_bump_on_unverified_component(self) -> None:
         previous = copy.deepcopy(self.matrix)
+        previous["backends"]["loki"]["runtime_verified"] = False
         updated = copy.deepcopy(previous)
         updated["backends"]["loki"]["version"] = "3.8.0"
         validate_pin_changes(updated, previous)  # should not raise
@@ -95,6 +96,32 @@ class VersionsTests(unittest.TestCase):
     def test_load_versions_rejects_missing_alloy_pin(self) -> None:
         document = copy.deepcopy(self.matrix)
         del document["collectors"]["alloy"]
+        with self.assertRaises(ConfigurationError):
+            load_versions(self.write(document))
+
+    def test_missing_tool_checksum_fails(self) -> None:
+        for tool in ("sops", "age"):
+            document = copy.deepcopy(self.matrix)
+            del document["secrets_tools"][tool]["sha256"]
+            with self.assertRaises(ConfigurationError):
+                load_versions(self.write(document))
+
+    def test_every_compose_image_has_a_digest_and_its_pinned_version(self) -> None:
+        matrix = load_versions()
+        images = matrix["container_images"]
+        pinned = {
+            "mimir": matrix["backends"]["mimir"]["version"], "loki": matrix["backends"]["loki"]["version"],
+            "tempo": matrix["backends"]["tempo"]["version"], "pyroscope": matrix["backends"]["pyroscope"]["version"],
+            "grafana": matrix["grafana_charts"]["grafana"]["app_version"],
+            "alloy": matrix["collectors"]["alloy"]["version"],
+            "traefik": matrix["kubernetes_platform"]["traefik"]["version"],
+            "seaweedfs": matrix["object_storage"]["version"],
+        }
+        for name, version in pinned.items():
+            self.assertEqual(images[name]["tag"].lstrip("v"), version, name)
+            self.assertRegex(images[name]["digest"], r"^sha256:[0-9a-f]{64}$")
+        document = copy.deepcopy(self.matrix)
+        del document["container_images"]["traefik"]["digest"]
         with self.assertRaises(ConfigurationError):
             load_versions(self.write(document))
 

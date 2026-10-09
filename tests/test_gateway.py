@@ -26,8 +26,12 @@ class GatewayRenderTests(unittest.TestCase):
     def test_every_router_is_authenticated_tls_only_and_host_bound(self) -> None:
         dynamic = traefik_dynamic(self.platform())
         routers, middlewares = dynamic["http"]["routers"], dynamic["http"]["middlewares"]
-        self.assertEqual(len(routers), len(ROUTES) * 2)
+        self.assertEqual(len(routers), (len(ROUTES) + 1) * 2)
+        backend_services = {route.upstream.replace(".", "-") for route in ROUTES}
         for name, router in routers.items():
+            if router["service"] == "grafana-ui":
+                continue
+            self.assertIn(router["service"], backend_services)
             with self.subTest(router=name):
                 (entry,) = router["entryPoints"]
                 auth = [item for item in router["middlewares"] if "forwardAuth" in middlewares[item]]
@@ -42,6 +46,23 @@ class GatewayRenderTests(unittest.TestCase):
                 self.assertEqual(query, {"entry": [entry], "signal": [route.signal], "permission": [route.permission]})
                 self.assertEqual(middlewares[auth[0]]["forwardAuth"]["authResponseHeaders"], ["X-Scope-OrgID"])
                 self.assertIn(router["service"], dynamic["http"]["services"])
+
+    def test_grafana_ui_is_routed_by_its_own_host_without_tenant_binding(self) -> None:
+        dynamic = traefik_dynamic(self.platform())
+        ui = {name: router for name, router in dynamic["http"]["routers"].items() if router["service"] == "grafana-ui"}
+        self.assertEqual(sorted(ui), ["port-443-grafana-ui", "port-8443-grafana-ui"])
+        for router in ui.values():
+            self.assertEqual(router["rule"], "Host(`grafana.nighthawk.internal`)")
+            self.assertEqual(router["tls"], {})
+            self.assertNotIn("middlewares", router)
+        self.assertEqual(
+            dynamic["http"]["services"]["grafana-ui"]["loadBalancer"]["servers"], [{"url": "http://grafana:3000"}],
+        )
+        # No signal-backend router answers for the UI host name.
+        for name, router in dynamic["http"]["routers"].items():
+            if name not in ui:
+                self.assertNotIn("grafana.nighthawk.internal", router["rule"])
+                self.assertIn("Host(`gateway.nighthawk.internal`)", router["rule"])
 
     def test_there_is_no_catch_all_or_administrative_route(self) -> None:
         for route in ROUTES:

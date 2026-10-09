@@ -1,0 +1,6 @@
+# Allow-list: only what the NightHawk image needs. Secrets, tools, and renders never enter the build context.
+*
+!requirements.txt
+!nighthawk/
+!config/
+**/__pycache__/

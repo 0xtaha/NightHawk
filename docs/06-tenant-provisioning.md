@@ -4,10 +4,11 @@
 
 `render-contracts` produces per-tenant runtime overrides for all four backends
 and a Grafana desired state. `provision-grafana` applies that state through
-Grafana's HTTP API. Everything here is unit-tested against the contract and
-against an in-memory fake Grafana. Nothing has been run against a real
-backend or a real Grafana; that is owed by the phases that first start the
-stack.
+Grafana's HTTP API. Both have been run on the Compose stack under rootless
+Podman: the backends load the overrides, Grafana 13.2.3 is provisioned, a
+second run reports no changes, and a provisioned data source returns data
+through the gateway. Deletion after the retention period has not been
+observed.
 
 ## Prerequisites
 
@@ -43,12 +44,21 @@ reviewed again.
 | Loki 3.7.8 | `retention` | `retention_period` | duration | [limits.go L215](https://github.com/grafana/loki/blob/v3.7.8/pkg/validation/limits.go#L215) |
 | Loki 3.7.8 | `ingestion_rate_bytes_per_second` | `ingestion_rate_mb` | MB per second, 1 MB = 1048576 bytes | [limits.go L95](https://github.com/grafana/loki/blob/v3.7.8/pkg/validation/limits.go#L95) |
 | Tempo 3.0.3 | `retention` | `compaction.block_retention` | duration | [config.go L184](https://github.com/grafana/tempo/blob/v3.0.3/modules/overrides/config.go#L184-L188) |
-| Tempo 3.0.3 | `ingestion_rate_bytes_per_second` | `ingestion.rate_limit_bytes` | bytes per second | [config.go L69](https://github.com/grafana/tempo/blob/v3.0.3/modules/overrides/config.go#L69-L73) |
+| Tempo 3.0.3 | `ingestion_rate_bytes_per_second` | `ingestion.rate_limit_bytes` and `ingestion.burst_size_bytes` | bytes per second; bytes | [config.go L69](https://github.com/grafana/tempo/blob/v3.0.3/modules/overrides/config.go#L69-L73) |
 | Pyroscope 2.3.1 (v2) | `retention` | `retention_period` | duration | [retention.go](https://github.com/grafana/pyroscope/blob/v2.3.1/pkg/metastore/index/cleaner/retention/retention.go) |
 | Pyroscope 2.3.1 (v2) | `ingestion_rate_bytes_per_second` | `ingestion_rate_mb` | MB per second | [limits.go L37](https://github.com/grafana/pyroscope/blob/v2.3.1/pkg/validation/limits.go#L37) |
 
 Megabyte values are the declared bytes divided by 1048576 and rounded to six
 decimal places, which is less than two bytes per second of error.
+
+Tempo does not merge a tenant's override entry with its configured
+defaults. Observed on a running Tempo 3.0.3: an entry that set only
+`rate_limit_bytes` left the burst at 0 and every write was refused. The burst
+is therefore rendered as one second of the declared rate. The same rule means
+a tenant with an entry does not inherit Tempo's other defaults
+(`max_traces_per_user`, `max_bytes_per_trace`, and the `read` limits become
+unlimited for it). The contract declares none of these, so they are not
+rendered; set them in the contract first if you need them.
 
 Mimir has no per-tenant byte-rate ingestion limit (only `ingestion_rate` in
 samples, `request_rate`, and burst settings), which is why the contract
@@ -84,6 +94,11 @@ them.
 
 Limits the contract does not declare, such as burst sizes and series limits,
 stay at backend defaults.
+
+On the running Compose stack each backend was observed reporting the
+rendered values (Mimir and Pyroscope at `/runtime_config`, Tempo at
+`/status/overrides/<tenant>`), and Mimir picked up a changed value within
+its reload period without a restart.
 
 A rendered retention value is not proof of deletion. Deletion must be
 observed after each backend's processing window, including noncurrent object

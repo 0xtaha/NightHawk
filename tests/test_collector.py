@@ -20,9 +20,12 @@ SIGNALS = ("metrics", "logs", "traces", "profiles")
 def block(text: str, header: str) -> str:
     """Return the body of the top-level block that starts with `header`."""
     start = text.index(header)
-    depth, index = 0, text.index("{", start)
+    depth, index, raw = 0, text.index("{", start), False
     for position in range(index, len(text)):
-        depth += {"{": 1, "}": -1}.get(text[position], 0)
+        if text[position] == "`":
+            raw = not raw
+        # Braces inside a raw string (a regular expression) are not block delimiters.
+        depth += 0 if raw else {"{": 1, "}": -1}.get(text[position], 0)
         if depth == 0:
             return text[index:position + 1]
     raise AssertionError(f"unterminated block {header}")
@@ -108,7 +111,7 @@ class RenderCollectorTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             self.assertEqual(main([*arguments, "--profile", "vm"]), 0)
         self.assertEqual(sorted(path.name for path in output.iterdir()), [
-            "datastream.alloy", "logs.alloy", "metrics.alloy", "profiles.alloy",
+            "datastream.alloy", "logs.alloy", "metrics.alloy",
         ])
         with redirect_stderr(io.StringIO()):
             self.assertEqual(main([*arguments, "--profile", "vm"]), 1)
@@ -143,8 +146,9 @@ class RenderCollectorTests(unittest.TestCase):
             text = "\n".join(self.render(profile).values())
             self.assertNotIn("X-Scope-OrgID", text)
             self.assertNotIn("tenant_id", text)
-            self.assertNotRegex(text, r'\bpassword\s*=')
-            self.assertEqual(text.count('password_file = sys.env("NIGHTHAWK_CREDENTIAL_FILE")'), 4)
+            self.assertEqual(re.findall(r'\bpassword\s*=\s*(\S+)', text), ["local.file.gateway_credential.content"])
+            self.assertEqual(text.count('password_file = sys.env("NIGHTHAWK_CREDENTIAL_FILE")'), 3)
+            self.assertIn('filename  = sys.env("NIGHTHAWK_CREDENTIAL_FILE")', text)
             self.assertIn('username      = "example-ingest"', text)
             self.assertIn("https://gateway.nighthawk.internal:8443", text)
 
@@ -242,6 +246,37 @@ class RenderCollectorTests(unittest.TestCase):
         del self.data["gateway"]["upstreams"]["profiles"]
         with self.assertRaisesRegex(ConfigurationError, "allow_privileged_profiling"):
             self.render("profiling-ebpf")
+
+    def test_otlp_only_collector_has_no_host_sources_but_full_redaction_and_delivery(self) -> None:
+        files = self.render("docker", otlp_only=True, self_monitoring=True)
+        self.assertEqual(sorted(files), ["datastream.alloy"])
+        text = files["datastream.alloy"]
+        for host_component in (
+            "discovery.", "loki.source.", "prometheus.exporter.unix", "prometheus.exporter.cadvisor",
+            "docker.sock", "/var/log", "pyroscope.scrape", "pyroscope.ebpf",
+        ):
+            self.assertNotIn(host_component, text)
+        for header in (
+            'prometheus.relabel "redact"', 'loki.relabel "redact"', 'loki.process "redact"',
+            'otelcol.processor.transform "redact"', 'pyroscope.relabel "redact"',
+            'prometheus.remote_write "gateway"', 'loki.write "gateway"',
+            'otelcol.exporter.otlphttp "gateway"', 'pyroscope.write "gateway"',
+            'prometheus.scrape "collector"', 'prometheus.scrape "platform"',
+        ):
+            self.assertIn(header, text)
+        # Pushed profiles are still accepted, and only through redaction.
+        receiver = block(text, 'pyroscope.receive_http "sdk"')
+        self.assertIn("forward_to = [pyroscope.relabel.redact.receiver]", receiver.replace("\t", ""))
+        for profile in ("k8s-node", "profiling-ebpf"):
+            self.stream["collection"]["allow_privileged_profiling"] = True
+            with self.assertRaisesRegex(ConfigurationError, "cannot be rendered OTLP-only"):
+                self.render(profile, otlp_only=True)
+
+    def test_sdk_profile_receiver_is_generated_once_for_push_capable_profiles(self) -> None:
+        for profile in BASE_PROFILES:
+            files = self.render(profile)
+            count = "\n".join(files.values()).count('pyroscope.receive_http "sdk"')
+            self.assertEqual(count, 0 if profile == "k8s-node" else 1, profile)
 
     def test_self_monitoring_is_explicit_and_limited_to_platform_profiles(self) -> None:
         for profile in BASE_PROFILES:

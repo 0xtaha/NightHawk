@@ -23,6 +23,7 @@ SERVER_CERT_FILE = f"{CONFIG_DIR}/gateway-server.crt.pem"
 SERVER_KEY_FILE = f"{CONFIG_DIR}/gateway-server.key.pem"
 DYNAMIC_FILE = f"{CONFIG_DIR}/traefik-dynamic.yaml"
 MIN_SECRET_LENGTH = 32
+GRAFANA_SERVICE = "grafana-ui"
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,8 @@ ROUTES = (
     ), "traces.query", ("strip", "/traces"), "Tempo read API"),
     Route("profiles-push", "profiles", "ingest", "HTTP", "Path(`/profiles/push.v1.PusherService/Push`)",
           "profiles", ("strip", "/profiles"), "Pyroscope push"),
+    Route("profiles-ingest", "profiles", "ingest", "HTTP", "Path(`/profiles/ingest`)",
+          "profiles", ("strip", "/profiles"), "Pyroscope ingest API"),
     Route("profiles-query", "profiles", "query", "HTTP", "PathPrefix(`/profiles/querier.v1.QuerierService/`)",
           "profiles", ("strip", "/profiles"), "Pyroscope query service"),
 )
@@ -128,6 +131,16 @@ def traefik_dynamic(platform: Platform) -> dict:
                 "service": service,
                 "tls": {},
             }
+    # The Grafana UI: its own host name, its own login, no tenant binding. Telemetry routers
+    # are bound to the gateway host name, so this host can never reach a signal backend.
+    services[GRAFANA_SERVICE] = {"loadBalancer": {"servers": [{"url": gateway.upstreams["grafana"]}]}}
+    for entry in gateway.entry_points:
+        routers[f"{entry.name}-{GRAFANA_SERVICE}"] = {
+            "entryPoints": [entry.name],
+            "rule": f"Host(`{platform.grafana.hostname}`)",
+            "service": GRAFANA_SERVICE,
+            "tls": {},
+        }
     return {
         "http": {"routers": routers, "middlewares": middlewares, "services": services},
         "tls": {
@@ -159,6 +172,8 @@ def traefik_static(platform: Platform, rules: list[dict]) -> dict:
         "entryPoints": entry_points,
         "providers": {"file": {"filename": DYNAMIC_FILE, "watch": True}},
         "metrics": {"prometheus": {"entryPoint": "metrics"}},
+        # Health endpoint for `traefik healthcheck`, on the private metrics listener.
+        "ping": {"entryPoint": "metrics"},
     }
 
 
@@ -183,6 +198,11 @@ def routes_markdown(platform: Platform) -> str:
             f"| {route.name} | {route.signal} | {route.permission} | {route.transport} | `` {match} `` | "
             f"`{platform.gateway.upstreams[route.upstream]}` | {sent} |"
         )
+    lines += [
+        "",
+        f"The Grafana UI is served for `https://{platform.grafana.hostname}` on the same listeners and",
+        "forwarded to Grafana without tenant authentication; Grafana performs its own login.",
+    ]
     plaintext = sorted(
         f"`{name}` ({address})" for name, address in platform.gateway.upstreams.items()
         if address.startswith(("http://", "h2c://"))

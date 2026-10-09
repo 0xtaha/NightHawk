@@ -27,6 +27,14 @@ for visual overviews of these profiles and the telemetry lifecycle.
 | Self-hosted production | Existing Linux nodes, k3s | SeaweedFS on replicated local PVC-backed storage | Requires validated disks and distinct failure domains | `environments/self-hosted-k8s` (zero-resource placeholder; Ansible/Helm-owned) |
 | AWS production | Multi-AZ EKS managed node groups | Separate component S3 buckets | Requires validated replicas, capacity, and failure domains | `environments/aws-state-bootstrap`, `environments/aws` (VPC+EKS), `environments/aws-storage` |
 
+The Docker profile is implemented as a static Compose file over a rendered
+configuration directory and started with `nighthawk quickstart-docker`; see
+the [quickstart](00-quickstart.md) and [Docker Compose](07-docker-compose.md).
+It has been run under rootless Podman, where tenant isolation, redaction,
+override loading, and persistence across restarts were observed. Docker
+Engine, retention deletion, and the production single-node profile are not
+verified.
+
 Compose uses monolithic backends and does not introduce Kafka. Kubernetes uses
 official Grafana charts and includes Strimzi-managed Kafka when required by the
 selected backend versions and storage architectures. Kafka topics, permissions,
@@ -113,9 +121,11 @@ provisioning, and host/infrastructure inputs.
 
 Implemented outputs: per-tenant runtime overrides for Mimir, Loki, Tempo, and
 Pyroscope; the Traefik gateway configuration and route table; the Grafana
-desired state; one collector configuration per datastream and profile; and,
-as a separate secret-bearing step, the gateway auth policy. Backend static
-configuration and host/infrastructure inputs are not rendered yet.
+desired state; one collector configuration per datastream and profile;
+each backend's own configuration for the Docker profile; and, as separate
+secret-bearing steps, the gateway auth policy and the local object storage
+identities. Backend configuration for Kubernetes and host/infrastructure
+inputs are not rendered yet.
 
 Each tenant/datastream pair declares:
 
@@ -192,6 +202,10 @@ This reduces resource usage but couples their availability; database failure
 can affect both object access and dashboards. Backup/restore acceptance must
 cover filer metadata together with object volumes, not just the Grafana database.
 AWS uses S3 and therefore does not need the SeaweedFS metadata database.
+
+In the Compose stack SeaweedFS serves S3 over TLS only, with one identity per
+signal backend restricted to that backend's buckets; cross-bucket and
+anonymous access were observed to be refused.
 
 Compose initialization owns local buckets and identities; Helm/Ansible
 orchestration owns their self-hosted Kubernetes equivalents. Terraform never

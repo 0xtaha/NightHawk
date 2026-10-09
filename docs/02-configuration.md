@@ -12,9 +12,10 @@ and provision Grafana. It implements the full SOPS + age secrets lifecycle
 gated on a `doctor` prerequisite check, and a `check-pins` drift check against
 the compatibility matrix.
 
-It does not deploy the platform or generate backend static configuration.
-Gateway enforcement, redaction, and retention are verified by unit tests and
-static checks only; none has been observed against running components. See
+`quickstart-docker` starts the whole platform with Docker Compose
+([quickstart](00-quickstart.md)). Gateway enforcement, redaction, override
+loading, and persistence have been observed on that stack under rootless
+Podman; retention deletion has not. Kubernetes deployment is not implemented. See
 [collection](04-collection.md), [gateway](05-gateway.md), and
 [tenant provisioning](06-tenant-provisioning.md).
 The network contract covers the gateway entry points and the flows behind the
@@ -84,14 +85,35 @@ Every address is explicit; nothing is derived from `deployment`.
 | `client_ca_secret_ref` | Secret holding the CA certificate that verifies collector certificates |
 | `client_ca_key_secret_ref` | Optional. Secret holding that CA's private key, only for a locally managed CA |
 | `auth_service` | Private address of the NightHawk auth service that Traefik calls |
-| `upstreams` | Backend addresses per signal: `metrics`, `logs`, `profiles`, and for `traces` the `query`, `otlp_grpc`, and `otlp_http` addresses. Required for every signal any datastream enables |
+| `upstreams` | Backend addresses per signal: `metrics`, `logs`, `profiles`, and for `traces` the `query`, `otlp_grpc`, and `otlp_http` addresses. Required for every signal any datastream enables. `grafana` is always required: the address the Grafana UI is forwarded to |
 | `revoked_certificate_fingerprints` | Lowercase hex SHA-256 fingerprints of collector certificates the gateway must refuse |
 
 Upstream and auth-service ports must match a network rule from `gateway` to
-that component (`mimir`, `loki`, `tempo`, `pyroscope`, `auth-service`), so the
+that component (`mimir`, `loki`, `tempo`, `pyroscope`, `grafana`, `auth-service`), so the
 network contract stays the single owner of ports. `http://` upstreams are
 plaintext links and must stay on a private network; see
 [gateway](05-gateway.md).
+
+### Grafana block
+
+The required `grafana` object has two fields:
+
+| Field | Meaning |
+| --- | --- |
+| `hostname` | DNS name of the Grafana UI. It must differ from the gateway hostname; the gateway serves both names on the same listeners and the gateway server certificate carries both |
+| `admin_secret_ref` | Secret holding the Grafana administrator password. It must not be reused for anything else |
+
+### Storage identity secrets
+
+For local SeaweedFS storage, each binding's `identity.ref` names a secret whose
+value is a JSON object with exactly `access_key` and `secret_key`. Create it
+with `generate-storage-identity`; any other shape is rejected when the storage
+configuration is rendered.
+
+```console
+$ python -m nighthawk generate-storage-identity --config config/tenants.example.yaml --identity mimir-storage
+Generated and encrypted the storage keys for mimir-storage in secrets/local.sops.yaml
+```
 
 Secret references point to SOPS-encrypted files under `secrets/`; no decryption
 occurs during contract validation. Actual encrypted files, age recipients,
@@ -152,8 +174,9 @@ they do not prove real AWS access or retention enforcement.
 
 This produces `platform.json`, `network.json`, `ports.md`, one
 `<backend>-overrides.yaml` per signal backend, `unenforced-limits.json`,
-`gateway/` (Traefik configuration and route table), and
-`grafana/desired-state.json`. `pyroscope-overrides.yaml` uses the approved Pyroscope 2.3.1 v2
+`gateway/` (Traefik configuration and route table),
+`grafana/desired-state.json`, and, for a `docker` deployment, `backends/`
+with each backend's own configuration ([Docker Compose](07-docker-compose.md)). `pyroscope-overrides.yaml` uses the approved Pyroscope 2.3.1 v2
 `retention_period` field, without a default retention or overrides for disabled
 profiling streams. A version/storage-mode/field change fails until its
 compatibility is explicitly reviewed. The fragment still requires a configured

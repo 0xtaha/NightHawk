@@ -44,7 +44,8 @@ class CrossArtifactTests(unittest.TestCase):
             self.assertEqual(set(policy.entry_points), set(ports))
             dynamic = yaml.safe_load((root / "contracts/gateway/traefik-dynamic.yaml").read_text())
             for router in dynamic["http"]["routers"].values():
-                self.assertIn(f"Host(`{hostname}`)", router["rule"])
+                expected = platform.grafana.hostname if router["service"] == "grafana-ui" else hostname
+                self.assertIn(f"Host(`{expected}`)", router["rule"])
                 self.assertLessEqual(set(router["entryPoints"]), set(ports))
 
             # Collectors use the local entry point; every profile targets a listening port with a known credential.

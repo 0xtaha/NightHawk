@@ -9,9 +9,11 @@ SOPS + age secrets lifecycle, AWS storage Terraform modules, the Terraform
 state-bootstrap root, the AWS VPC/EKS compute root, and the self-hosted/Docker
 zero-resource Terraform boundary roots are implemented and locally tested.
 The Alloy collector configurations, the tenant gateway configuration and auth
-service, per-tenant runtime overrides, and Grafana tenant provisioning are
-implemented and unit-tested, but have not been run against live components.
-Dashboards, alerting, and full deployment automation remain planned.
+service, per-tenant runtime overrides, Grafana tenant provisioning, backend
+configuration, and local object storage provisioning are implemented, and
+run together in the Docker Compose stack, which has been exercised under
+rootless Podman. The Kubernetes and AWS runtimes, dashboards, alerting, and
+full deployment automation remain planned.
 
 ## 1. Platform architecture
 

@@ -144,3 +144,11 @@ rules:
     purpose: Self-monitoring scrape of Pyroscope metrics
     scope: private
     direction: source-to-destination
+  - id: gateway-grafana
+    source: gateway
+    destination: grafana
+    protocol: tcp
+    port: 3000
+    purpose: Grafana UI behind the gateway listener
+    scope: private
+    direction: source-to-destination

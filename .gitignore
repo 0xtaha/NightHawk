@@ -21,3 +21,8 @@ secrets/*
 *.key
 !*.example
 .tools/
+.materialized-secrets-e2e/
+# Development secrets written by quickstart-docker and the end-to-end tests. They are encrypted
+# to a local age key that is never committed, so committing them is useless.
+secrets/local.sops.yaml
+secrets/e2e.sops.yaml

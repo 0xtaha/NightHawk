@@ -1,0 +1,349 @@
+# NightHawk single-host stack. Static by design: everything tenant-specific is rendered into
+# NIGHTHAWK_RENDERED_DIR and NIGHTHAWK_SECRETS_DIR and mounted as directories.
+# See docs/07-docker-compose.md. Start it with `python -m nighthawk quickstart-docker`.
+
+# Every service runs as the user that owns the owner-only secret files. Under Docker Engine
+# that is the operator's UID. Under rootless Podman it is 0:0, which is the unprivileged
+# operator outside the container; see docs/07-docker-compose.md.
+x-run-as: &run-as
+  user: "${NIGHTHAWK_UID:?}:${NIGHTHAWK_GID:?}"
+
+x-service: &service
+  <<: *run-as
+  restart: unless-stopped
+
+x-nighthawk-image: &nighthawk-image
+  image: localhost/nighthawk/nighthawk:local
+  build:
+    context: ..
+    dockerfile: docker-compose/nighthawk.Dockerfile
+
+x-backend: &backend
+  <<: *service
+  environment:
+    # The storage CA. Go reads it instead of the system bundle; backends only call storage.
+    SSL_CERT_FILE: /etc/nighthawk/storage/ca.pem
+  networks: [backend, storage]
+  depends_on:
+    volume-init: {condition: service_completed_successfully}
+    storage-init: {condition: service_completed_successfully}
+
+services:
+  # Named volumes are created root-owned. This is the only service that runs as root.
+  volume-init:
+    <<: *nighthawk-image
+    user: "0:0"
+    network_mode: none
+    entrypoint: ["chown", "-R", "${NIGHTHAWK_UID:?}:${NIGHTHAWK_GID:?}", "/volumes"]
+    volumes:
+      - seaweedfs-data:/volumes/seaweedfs
+      - mimir-data:/volumes/mimir
+      - loki-data:/volumes/loki
+      - tempo-data:/volumes/tempo
+      - pyroscope-data:/volumes/pyroscope
+      - grafana-data:/volumes/grafana
+      - alloy-data:/volumes/alloy
+
+  seaweedfs:
+    <<: *service
+    image: docker.io/chrislusf/seaweedfs:4.47@sha256:f83509b0721dfd8e2e07faf76c0a899f67a8a889c89abe2fa0a5227ba1320362
+    entrypoint: ["weed"]
+    # With a certificate and no separate HTTPS port, the S3 port serves TLS only.
+    command:
+      - server
+      - -dir=/data
+      - -ip=seaweedfs
+      - -ip.bind=0.0.0.0
+      - -volume.max=100
+      - -master.volumeSizeLimitMB=1024
+      - -s3
+      - -s3.port=8333
+      - -s3.config=/etc/nighthawk/storage/s3.json
+      - -s3.cert.file=/etc/nighthawk/storage/storage-server.crt.pem
+      - -s3.key.file=/etc/nighthawk/storage/storage-server.key.pem
+      - -s3.port.iceberg=0
+      - -s3.port.lance=0
+    volumes:
+      - seaweedfs-data:/data
+      - ${NIGHTHAWK_SECRETS_DIR:?}/runtime/storage:/etc/nighthawk/storage:ro,z
+    networks: [storage]
+    mem_limit: 1g
+    stop_grace_period: 15s
+    depends_on:
+      volume-init: {condition: service_completed_successfully}
+    healthcheck:
+      # The probe talks to this container's own loopback; the certificate names the service, not 127.0.0.1.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9333/cluster/healthz && wget -q --no-check-certificate -O /dev/null https://127.0.0.1:8333/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+
+  storage-init:
+    <<: *run-as
+    image: docker.io/chrislusf/seaweedfs:4.47@sha256:f83509b0721dfd8e2e07faf76c0a899f67a8a889c89abe2fa0a5227ba1320362
+    entrypoint: ["/bin/sh", "/opt/nighthawk/storage-init.sh"]
+    environment:
+      NIGHTHAWK_STORAGE_MASTER: seaweedfs:9333
+    volumes:
+      - ./storage-init.sh:/opt/nighthawk/storage-init.sh:ro,z
+      - ${NIGHTHAWK_SECRETS_DIR:?}/runtime/storage:/etc/nighthawk/storage:ro,z
+    networks: [storage]
+    depends_on:
+      seaweedfs: {condition: service_healthy}
+
+  mimir:
+    <<: *backend
+    image: docker.io/grafana/mimir:3.2.1@sha256:d42bfba7a8ef82a14b883a4cf235406324aeecae94c85eba000bdaa21aa2f289
+    command: ["-config.file=/etc/nighthawk/contracts/backends/mimir.yaml", "-config.expand-env=true"]
+    env_file: ["${NIGHTHAWK_SECRETS_DIR:?}/runtime/backends/mimir.env"]
+    volumes:
+      - mimir-data:/data
+      - ${NIGHTHAWK_RENDERED_DIR:?}/contracts:/etc/nighthawk/contracts:ro,z
+      - ${NIGHTHAWK_RENDERED_DIR:?}/overrides:/etc/nighthawk/overrides:ro,z
+      - ${NIGHTHAWK_SECRETS_DIR:?}/runtime/storage-trust:/etc/nighthawk/storage:ro,z
+    mem_limit: 2g
+
+  loki:
+    <<: *backend
+    image: docker.io/grafana/loki:3.7.8@sha256:81a6802ec4bd1b88c564494f06376889ed022998a188826190d26d2754ac2aae
+    command: ["-config.file=/etc/nighthawk/contracts/backends/loki.yaml", "-config.expand-env=true"]
+    env_file: ["${NIGHTHAWK_SECRETS_DIR:?}/runtime/backends/loki.env"]
+    volumes:
+      - loki-data:/data
+      - ${NIGHTHAWK_RENDERED_DIR:?}/contracts:/etc/nighthawk/contracts:ro,z
+      - ${NIGHTHAWK_RENDERED_DIR:?}/overrides:/etc/nighthawk/overrides:ro,z
+      - ${NIGHTHAWK_SECRETS_DIR:?}/runtime/storage-trust:/etc/nighthawk/storage:ro,z
+    mem_limit: 2g
+
+  tempo:
+    <<: *backend
+    image: docker.io/grafana/tempo:3.0.3@sha256:05321ebf1f191fde34282b3dc86e68f511d489133df7963cd1670a2e1e11b33c
+    command: ["-config.file=/etc/nighthawk/contracts/backends/tempo.yaml", "-config.expand-env=true", "-target=all"]
+    env_file: ["${NIGHTHAWK_SECRETS_DIR:?}/runtime/backends/tempo.env"]
+    volumes:
+      - tempo-data:/var/tempo
+      - ${NIGHTHAWK_RENDERED_DIR:?}/contracts:/etc/nighthawk/contracts:ro,z
+      - ${NIGHTHAWK_RENDERED_DIR:?}/overrides:/etc/nighthawk/overrides:ro,z
+      - ${NIGHTHAWK_SECRETS_DIR:?}/runtime/storage-trust:/etc/nighthawk/storage:ro,z
+    mem_limit: 2g
+
+  pyroscope:
+    <<: *backend
+    image: docker.io/grafana/pyroscope:2.3.1@sha256:718b585ea168a616ca737018dbd1676992db9e5f1084ec4e9cd18f669326f334
+    # v2 storage and its local directories have no documented YAML form at this version, so they are flags.
+    command:
+      - -config.file=/etc/nighthawk/contracts/backends/pyroscope.yaml
+      - -config.expand-env=true
+      - -architecture.storage=v2
+      - -metastore.data-dir=/data/metastore/data
+      - -metastore.raft.dir=/data/metastore/raft
+      - -metastore.raft.snapshots-dir=/data/metastore/snapshots
+      - -pyroscopedb.data-path=/data/db
+      - -compaction-worker.temp-dir=/data/compaction
+      - -self-profiling.disable-push=true
+    env_file: ["${NIGHTHAWK_SECRETS_DIR:?}/runtime/backends/pyroscope.env"]
+    volumes:
+      - pyroscope-data:/data
+      - ${NIGHTHAWK_RENDERED_DIR:?}/contracts:/etc/nighthawk/contracts:ro,z
+      - ${NIGHTHAWK_RENDERED_DIR:?}/overrides:/etc/nighthawk/overrides:ro,z
+      - ${NIGHTHAWK_SECRETS_DIR:?}/runtime/storage-trust:/etc/nighthawk/storage:ro,z
+    mem_limit: 2g
+
+  # The backend images have no shell or HTTP client, so readiness is observed from outside.
+  wait-backends:
+    <<: [*nighthawk-image, *run-as]
+    command:
+      - wait-http
+      - --timeout=300
+      - --url=http://mimir:8080/ready
+      - --url=http://loki:3100/ready
+      - --url=http://tempo:3200/ready
+      - --url=http://pyroscope:4040/ready
+    networks: [backend]
+    depends_on: [mimir, loki, tempo, pyroscope]
+
+  authz:
+    <<: [*nighthawk-image, *service]
+    command: ["serve-authz", "--policy=/run/nighthawk/authz/policy.json", "--listen=0.0.0.0:9180"]
+    volumes:
+      - ${NIGHTHAWK_SECRETS_DIR:?}/runtime/authz:/run/nighthawk/authz:ro,z
+    # Reachable only by the proxy and the collector that scrapes its metrics.
+    networks: [authz]
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "python", "-m", "nighthawk", "wait-http", "--timeout=3", "--url=http://127.0.0.1:9180/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  traefik:
+    <<: *service
+    image: docker.io/library/traefik:v3.7.13@sha256:3429c14149401de2ac82fc72ddc6a92642332b90deb3012301ff211b9d2d0f18
+    command: ["traefik", "--configFile=/etc/nighthawk/gateway/traefik-static.yaml"]
+    # Lets the non-root proxy listen on 443 inside its own network namespace.
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: 0
+    volumes:
+      - ${NIGHTHAWK_SECRETS_DIR:?}/runtime/gateway:/etc/nighthawk/gateway:ro,z
+    ports:
+      - "${NIGHTHAWK_BIND_ADDRESS:-127.0.0.1}:8443:8443"
+    networks:
+      edge:
+        aliases:
+          - ${NIGHTHAWK_GATEWAY_HOSTNAME:?}
+          - ${NIGHTHAWK_GRAFANA_HOSTNAME:?}
+      backend: {}
+      authz: {}
+    mem_limit: 512m
+    depends_on:
+      authz: {condition: service_healthy}
+      wait-backends: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--configFile=/etc/nighthawk/gateway/traefik-static.yaml"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  grafana:
+    <<: *service
+    image: docker.io/grafana/grafana:13.2.3@sha256:d84563330dc9d2fd2bc096d0fb96021b5319c75bf6ed555566709998e823dec4
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/nighthawk/grafana/admin-password
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_DOMAIN: ${NIGHTHAWK_GRAFANA_HOSTNAME:?}
+      GF_SERVER_ROOT_URL: https://${NIGHTHAWK_GRAFANA_HOSTNAME:?}:8443/
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      # Data sources call the gateway, whose certificate is signed by the local CA.
+      SSL_CERT_FILE: /run/nighthawk/grafana/gateway-ca.pem
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ${NIGHTHAWK_SECRETS_DIR:?}/runtime/grafana:/run/nighthawk/grafana:ro,z
+    networks: [edge]
+    mem_limit: 1g
+    depends_on:
+      volume-init: {condition: service_completed_successfully}
+      traefik: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 36
+
+  alloy:
+    <<: *service
+    image: docker.io/grafana/alloy:v1.20.1@sha256:5133c159d34c7acf37a1b6d91682abcb6b28b2a29bae152ff5cf4753296f956c
+    command: ["run", "/etc/nighthawk/collector", "--storage.path=/var/lib/alloy", "--server.http.listen-addr=0.0.0.0:12345"]
+    environment:
+      NIGHTHAWK_CREDENTIAL_FILE: /run/nighthawk/collector/credential
+      NIGHTHAWK_GATEWAY_CA_FILE: /run/nighthawk/collector/gateway-ca.pem
+      NIGHTHAWK_CLIENT_CERT_FILE: /run/nighthawk/collector/client.crt.pem
+      NIGHTHAWK_CLIENT_KEY_FILE: /run/nighthawk/collector/client.key.pem
+      NIGHTHAWK_GATEWAY_METRICS_ADDRESS: traefik:8082
+    volumes:
+      - alloy-data:/var/lib/alloy
+      - ${NIGHTHAWK_RENDERED_DIR:?}/collector:/etc/nighthawk/collector:ro,z
+      - ${NIGHTHAWK_SECRETS_DIR:?}/runtime/collector:/run/nighthawk/collector:ro,z
+    # edge: the gateway and pushing applications. backend and authz: self-monitoring scrapes only.
+    networks: [edge, backend, authz]
+    mem_limit: 1g
+    depends_on:
+      volume-init: {condition: service_completed_successfully}
+      traefik: {condition: service_healthy}
+
+  # The Alloy image has no HTTP client either.
+  wait-alloy:
+    <<: [*nighthawk-image, *run-as]
+    command: ["wait-http", "--timeout=120", "--url=http://alloy:12345/-/ready"]
+    networks: [edge]
+    depends_on: [alloy]
+
+  # One-shot tools, started explicitly with `compose run --rm`.
+  grafana-init:
+    <<: [*nighthawk-image, *run-as]
+    profiles: [tools]
+    command:
+      - provision-grafana
+      - --config=/etc/nighthawk/platform/platform.yaml
+      - --url=http://grafana:3000
+      - --admin-user=admin
+      - --admin-password-file=/run/nighthawk/grafana/admin-password
+      - --secrets-dir=/run/nighthawk/secrets
+    volumes:
+      - ${NIGHTHAWK_RENDERED_DIR:?}/platform:/etc/nighthawk/platform:ro,z
+      - ${NIGHTHAWK_SECRETS_DIR:?}/runtime/grafana:/run/nighthawk/grafana:ro,z
+      - ${NIGHTHAWK_SECRETS_DIR:?}/secrets:/run/nighthawk/secrets/secrets:ro,z
+    networks: [edge]
+
+  fixtures:
+    <<: [*nighthawk-image, *run-as]
+    profiles: [tools]
+    # Add --tenant, --datastream, and --run-id when running it.
+    entrypoint: ["python", "-m", "nighthawk", "emit-fixtures", "--otlp=http://alloy:4318", "--profiles=http://alloy:4040", "--config=/etc/nighthawk/platform/platform.yaml"]
+    volumes:
+      - ${NIGHTHAWK_RENDERED_DIR:?}/platform:/etc/nighthawk/platform:ro,z
+    networks: [edge]
+
+  # Optional: an SDK-instrumented service that pushes to the collector.
+  sample:
+    <<: *service
+    profiles: [sample]
+    image: localhost/nighthawk/sample-workload:local
+    build:
+      context: ../sample-workload
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://alloy:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_SERVICE_NAME: nighthawk-sample
+      PYROSCOPE_SERVER_ADDRESS: http://alloy:4040
+    networks: [edge]
+    mem_limit: 256m
+    depends_on:
+      wait-alloy: {condition: service_completed_successfully}
+
+  # Optional, Docker Engine only: host and container collection. Needs the runtime socket,
+  # host mounts, and root, so it is never part of the default stack.
+  alloy-host:
+    profiles: [host-collection]
+    restart: unless-stopped
+    image: docker.io/grafana/alloy:v1.20.1@sha256:5133c159d34c7acf37a1b6d91682abcb6b28b2a29bae152ff5cf4753296f956c
+    command: ["run", "/etc/nighthawk/collector", "--storage.path=/var/lib/alloy", "--server.http.listen-addr=0.0.0.0:12345"]
+    user: "0:0"
+    privileged: true
+    environment:
+      NIGHTHAWK_CREDENTIAL_FILE: /run/nighthawk/collector/credential
+      NIGHTHAWK_GATEWAY_CA_FILE: /run/nighthawk/collector/gateway-ca.pem
+      NIGHTHAWK_CLIENT_CERT_FILE: /run/nighthawk/collector/client.crt.pem
+      NIGHTHAWK_CLIENT_KEY_FILE: /run/nighthawk/collector/client.key.pem
+    volumes:
+      - alloy-host-data:/var/lib/alloy
+      - ${NIGHTHAWK_RENDERED_DIR:?}/collector-host:/etc/nighthawk/collector:ro,z
+      - ${NIGHTHAWK_SECRETS_DIR:?}/runtime/collector:/run/nighthawk/collector:ro,z
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /:/rootfs:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+    networks: [edge]
+    depends_on:
+      traefik: {condition: service_healthy}
+
+networks:
+  # Collectors, Grafana, and applications. The proxy is the only way from here to a backend.
+  edge: {}
+  backend: {internal: true}
+  storage: {internal: true}
+  authz: {internal: true}
+
+volumes:
+  seaweedfs-data: {}
+  mimir-data: {}
+  loki-data: {}
+  tempo-data: {}
+  pyroscope-data: {}
+  grafana-data: {}
+  alloy-data: {}
+  alloy-host-data: {}

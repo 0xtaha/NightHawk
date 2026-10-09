@@ -45,9 +45,11 @@ def _loki(policy: SignalPolicy) -> dict:
 
 
 def _tempo(policy: SignalPolicy) -> dict:
+    # Tempo does not merge a tenant's entry with its defaults: an unset burst is 0 and every
+    # write is refused. The burst is one second of the declared rate.
     return {
         "compaction": {"block_retention": f"{policy.retention_hours}h"},
-        "ingestion": {"rate_limit_bytes": policy.ingestion_rate},
+        "ingestion": {"rate_limit_bytes": policy.ingestion_rate, "burst_size_bytes": policy.ingestion_rate},
     }
 
 

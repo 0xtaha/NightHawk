@@ -3,12 +3,21 @@
   "$id": "urn:nighthawk:platform:1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "deployment", "profile", "gateway", "storage", "secrets", "credentials", "tenants"],
+  "required": ["schema_version", "deployment", "profile", "gateway", "grafana", "storage", "secrets", "credentials", "tenants"],
   "properties": {
     "schema_version": {"const": 1},
     "deployment": {"enum": ["docker", "self-hosted-k8s", "aws"]},
     "profile": {"enum": ["development", "production"]},
     "gateway": {"$ref": "#/$defs/gateway"},
+    "grafana": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hostname", "admin_secret_ref"],
+      "properties": {
+        "hostname": {"$ref": "#/$defs/hostname"},
+        "admin_secret_ref": {"$ref": "#/$defs/id"}
+      }
+    },
     "storage": {"$ref": "#/$defs/storage"},
     "secrets": {
       "type": "object",
@@ -115,13 +124,14 @@
         "query_concurrency": {"type": "integer", "minimum": 1}
       }
     },
+    "hostname": {"type": "string", "maxLength": 253, "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$"},
     "origin": {"type": "string", "pattern": "^https?://[a-z0-9]([a-z0-9.-]*[a-z0-9])?:[0-9]{1,5}$"},
     "gateway": {
       "type": "object",
       "additionalProperties": false,
       "required": ["hostname", "entry_points", "grafana_entry_point", "client_ca_secret_ref", "auth_service", "upstreams", "revoked_certificate_fingerprints"],
       "properties": {
-        "hostname": {"type": "string", "maxLength": 253, "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$"},
+        "hostname": {"$ref": "#/$defs/hostname"},
         "entry_points": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
         "grafana_entry_point": {"$ref": "#/$defs/id"},
         "client_ca_secret_ref": {"$ref": "#/$defs/id"},
@@ -130,8 +140,9 @@
         "upstreams": {
           "type": "object",
           "additionalProperties": false,
-          "minProperties": 1,
+          "required": ["grafana"],
           "properties": {
+            "grafana": {"$ref": "#/$defs/origin"},
             "metrics": {"$ref": "#/$defs/origin"},
             "logs": {"$ref": "#/$defs/origin"},
             "traces": {

@@ -11,6 +11,7 @@
     "kubernetes_platform",
     "grafana_charts",
     "collectors",
+    "container_images",
     "validation_tools",
     "secrets_tools",
     "os_support",
@@ -133,6 +134,22 @@
         "alloy": { "$ref": "#/$defs/pin" }
       }
     },
+    "container_images": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mimir", "loki", "tempo", "pyroscope", "grafana", "alloy", "traefik", "seaweedfs", "python_base"],
+      "properties": {
+        "mimir": { "$ref": "#/$defs/image" },
+        "loki": { "$ref": "#/$defs/image" },
+        "tempo": { "$ref": "#/$defs/image" },
+        "pyroscope": { "$ref": "#/$defs/image" },
+        "grafana": { "$ref": "#/$defs/image" },
+        "alloy": { "$ref": "#/$defs/image" },
+        "traefik": { "$ref": "#/$defs/image" },
+        "seaweedfs": { "$ref": "#/$defs/image" },
+        "python_base": { "$ref": "#/$defs/image" }
+      }
+    },
     "validation_tools": {
       "type": "object",
       "additionalProperties": false,
@@ -166,8 +183,8 @@
       "additionalProperties": false,
       "required": ["sops", "age"],
       "properties": {
-        "sops": { "$ref": "#/$defs/pin" },
-        "age": { "$ref": "#/$defs/pin" }
+        "sops": { "$ref": "#/$defs/tool_pin" },
+        "age": { "$ref": "#/$defs/tool_pin" }
       }
     },
     "os_support": {
@@ -215,6 +232,31 @@
         "version": { "$ref": "#/$defs/version" },
         "source": { "$ref": "#/$defs/source" },
         "runtime_verified": { "type": "boolean" }
+      }
+    },
+    "tool_pin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "source", "runtime_verified", "sha256"],
+      "properties": {
+        "version": { "$ref": "#/$defs/version" },
+        "source": { "$ref": "#/$defs/source" },
+        "runtime_verified": { "type": "boolean" },
+        "sha256": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "tag", "digest"],
+      "properties": {
+        "repository": { "type": "string", "pattern": "^[a-z0-9.-]+(/[a-z0-9._-]+)+$" },
+        "tag": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+        "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
       }
     },
     "chart_pin": {

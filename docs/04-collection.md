@@ -53,6 +53,7 @@ exist. Run it with `alloy run <directory>`.
 | `--entry-point` | The gateway entry point (network rule ID) the collector connects to. Required when the document selects more than one |
 | `--credential` | The ingestion credential ID. Required when several qualify, for example during a rotation |
 | `--self-monitoring` | `docker` and `k8s-cluster` only. Also scrapes the signal backends, the auth service, and the gateway proxy |
+| `--otlp-only` | Omits the profile's host sources. The collector then only receives pushed telemetry and scrapes itself, and needs no runtime socket, host mount, or privilege. Not available for `k8s-node` and `profiling-ebpf`, which have only host sources |
 
 Only files for the datastream's enabled signals are written, and
 `datastream.alloy` contains pipelines only for those signals.
@@ -69,14 +70,16 @@ Only files for the datastream's enabled signals are written, and
 | `NIGHTHAWK_GATEWAY_METRICS_ADDRESS` | `--self-monitoring` | `host:port` of the gateway proxy's metrics listener (network rule `collector-gateway-metrics`) |
 
 No secret value is written into a configuration. The credential ID is, as the
-basic-auth user name.
+basic-auth user name. The credential file must hold the secret without a
+trailing newline: the OTLP exporter reads it through `local.file`, which does
+not trim.
 
 ## Profiles
 
 | Profile | Metrics | Logs | Profiles | Certificate |
 | --- | --- | --- | --- | --- |
 | `docker` | Host (`prometheus.exporter.unix`) and containers (cAdvisor) | Container logs through the Docker socket | SDK push to `:4040` | If the credential declares one |
-| `k8s-node` | Kubelet, cAdvisor, and node exporter for this node | Logs of pods on this node from `/var/log/pods` | pprof scrape of pods on this node annotated `profiles.grafana.com/cpu.scrape: "true"` | If the credential declares one |
+| `k8s-node` | Kubelet, cAdvisor, and node exporter for this node | Logs of pods on this node from `/var/log/pods` | pprof scrape of pods on this node annotated `profiles.grafana.com/cpu.scrape: "true"`; no SDK push | If the credential declares one |
 | `k8s-cluster` | kube-state-metrics, API server, services annotated `prometheus.io/scrape: "true"` | Kubernetes events | SDK push to `:4040` | If the credential declares one |
 | `remote-cluster` | kube-state-metrics and annotated services | Pod logs through the Kubernetes API, and events | SDK push to `:4040` | Required |
 | `vm` | Host | systemd journal and `/var/log/*.log` | SDK push to `:4040` | Required |
@@ -146,7 +149,7 @@ before delivery.
 | Log labels | `labeldrop` in `loki.relabel.redact` |
 | Log message bodies | `key=value`, `key: value`, and JSON `"key": value` have the value replaced with `[REDACTED]` |
 | OTLP resource, scope, span, span-event, data-point, and log attributes | `delete_matching_keys` in `otelcol.processor.transform.redact` |
-| OTLP log bodies that are strings | The `key=value` match is replaced with `[REDACTED]` |
+| OTLP log bodies that are strings | `key=value`, `key: value`, and JSON `"key": value` matches are replaced with `[REDACTED]` |
 | Profile labels | `labeldrop` in `pyroscope.relabel.redact` |
 
 The OTLP transform runs with `error_mode = "propagate"`: if a statement
@@ -202,6 +205,16 @@ checked against the release's `SHA256SUMS`. With it:
 `alloy validate` checks syntax, component names, required and unknown
 arguments. It does not check types, references between components, or
 anything that needs a running target, so it is not proof the collectors work.
+Running the collector found one thing it missed: Alloy 1.20.1 fails to build
+`otelcol.auth.basic` with a `client_auth` block ("no credential source
+provided"), so the generated configuration uses the component's top-level
+`username` and `password` arguments instead.
+
+The `docker` profile rendered `--otlp-only --self-monitoring` runs in the
+Compose stack and has been observed delivering all four signals through the
+gateway with mutual TLS, with every drop-field marker removed
+([Docker Compose](07-docker-compose.md)). The other profiles' host sources
+have not been run.
 
 ## Component reference
 

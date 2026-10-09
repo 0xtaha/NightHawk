@@ -78,10 +78,17 @@ allow-lists because backends serve write APIs under the same prefixes.
 | traces | ingest | OTLP gRPC | `/opentelemetry.proto.collector.trace.v1.TraceService/Export` | unchanged, OTLP gRPC receiver |
 | traces | query | HTTP | `/traces/api/{echo, traces/<id>, v2/traces/<id>, search, search/tags, search/tag/<name>/values, v2/search/tags, v2/search/tag/<name>/values, metrics/query, metrics/query_range}` | `/api/...` |
 | profiles | ingest | Pyroscope push | `/profiles/push.v1.PusherService/Push` | `/push.v1.PusherService/Push` |
+| profiles | ingest | Pyroscope ingest API | `/profiles/ingest` | `/ingest` |
 | profiles | query | HTTP | `/profiles/querier.v1.QuerierService/*` | `/querier.v1.QuerierService/*` |
 
 OTLP over gRPC is offered for traces only. Mimir and Loki accept OTLP over
 HTTP, not gRPC.
+
+The Grafana UI is a separate case: requests for `grafana.hostname` on the
+same listeners are forwarded to Grafana with no tenant authentication and no
+tenant header, and Grafana performs its own login. Every telemetry route is
+bound to `gateway.hostname`, so the UI host name can never reach a signal
+backend.
 
 Backend paths were read at the pinned tags:
 [Mimir api.go](https://github.com/grafana/mimir/blob/mimir-3.2.1/pkg/api/api.go#L298-L299),
@@ -170,7 +177,15 @@ Issued .materialized-secrets/collector/example-ingest.crt.pem with key .material
 SHA-256 fingerprint: ...
 $ python -m nighthawk issue-certificate --config config/tenants.example.yaml \
     --server --valid-days 90 --output-dir .materialized-secrets/gateway
+$ python -m nighthawk issue-certificate --config config/tenants.example.yaml \
+    --storage --valid-days 90 --output-dir .materialized-secrets/storage
 ```
+
+`--server` issues one certificate for the gateway and Grafana UI host names.
+`--storage` issues one for exactly the host names of the local storage
+binding endpoints, and is refused for cloud storage. `quickstart-docker` runs
+all of these steps for you and renews a certificate that has less than seven
+days left.
 
 `--recipient` is needed only when the SOPS file does not exist yet; later
 keys keep the file's recipients. A collector certificate is issued only for
@@ -248,18 +263,28 @@ Read from Traefik `v3.7.13` source.
 | An empty `customRequestHeaders` value removes the header | [headers.md](https://github.com/traefik/traefik/blob/v3.7.13/docs/content/reference/routing-configuration/http/middlewares/headers.md) |
 | `h2c://` service URLs for cleartext gRPC backends | [v3 migration](https://github.com/traefik/traefik/blob/v3.7.13/docs/content/migrate/v3.md) |
 
+## Observed at runtime
+
+The end-to-end suite (`tests/e2e/`, see [Docker Compose](07-docker-compose.md))
+ran against Traefik 3.7.13 under rootless Podman and observed:
+
+- A forged `X-Forwarded-Tls-Client-Cert` header, including the underscore
+  alias, without a TLS client certificate is refused for a
+  certificate-bound credential.
+- OTLP gRPC trace export passes `forwardAuth` and reaches Tempo; a denial on
+  the gRPC path is a plain HTTP 401 or 403.
+- Each credential reads only its own backend ID; spoofed and multi-tenant
+  `X-Scope-OrgID` values, write-only queries, and query-only writes are
+  refused; a revoked certificate is refused after a policy reload while a
+  sibling certificate keeps working.
+
 ## What is still unproven
 
-These need a running Traefik and are owed by Phase 4:
-
-- That a client-supplied `X-Forwarded-Tls-Client-Cert` without a TLS client
-  certificate never reaches the auth service. It follows from the source
-  above, but has not been observed.
-- That `forwardAuth` and path routing work for gRPC. This is inferred from
-  the code, not documented by Traefik.
 - Throughput of the auth service. It is a standard-library threaded HTTP
   server on the path of every request and has not been load-tested. It is
   stateless, so it can be replicated.
+- Behaviour on a `restricted-external` entry point from outside the host.
+  The suite reaches only the loopback entry point.
 
 ## Troubleshooting
 

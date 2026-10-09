@@ -187,6 +187,9 @@ def reconcile(
             declared_uids.add(uid)
             label = f"data source {name}/{datasource['name']} ({uid})"
             current = existing.get(uid)
+            if current is not None:
+                # The list response omits basicAuthUser, so compare against the full record.
+                _, current = _expect(client, "GET", f"/api/datasources/uid/{uid}", None, org_id, (200,))
             differs = current is not None and any(
                 current.get(key) != datasource[key] for key in COMPARED_FIELDS
             )

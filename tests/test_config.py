@@ -294,6 +294,25 @@ class ConfigurationTests(unittest.TestCase):
         self.data["gateway"]["client_ca_secret_ref"] = "example-ingest"
         self.assert_invalid("gateway CA references must not reuse")
 
+    def test_grafana_block_is_loaded_and_cross_checked(self) -> None:
+        platform = load_platform(self.write())
+        self.assertEqual(platform.grafana.hostname, "grafana.nighthawk.internal")
+        self.assertEqual(platform.gateway.upstreams["grafana"], "http://grafana:3000")
+        self.data["grafana"]["hostname"] = self.data["gateway"]["hostname"]
+        self.assert_invalid("hostname must differ from the gateway hostname")
+
+    def test_grafana_admin_secret_must_exist_and_be_its_own(self) -> None:
+        self.data["grafana"]["admin_secret_ref"] = "missing"
+        self.assert_invalid("unknown secret")
+        self.data["grafana"]["admin_secret_ref"] = "example-query"
+        self.assert_invalid("admin_secret_ref must not reuse another secret")
+
+    def test_grafana_upstream_is_required_and_port_checked(self) -> None:
+        self.data["gateway"]["upstreams"]["grafana"] = "http://grafana:3001"
+        self.assert_invalid("upstreams.grafana port 3001 is not a network rule from gateway to grafana")
+        del self.data["gateway"]["upstreams"]["grafana"]
+        self.assert_invalid("grafana")
+
     def test_metrics_budget_in_bytes_fails_and_names_the_expected_field(self) -> None:
         metrics = self.data["tenants"][0]["datastreams"][0]["signals"]["metrics"]
         metrics["ingestion_rate_bytes_per_second"] = metrics.pop("ingestion_rate_samples_per_second")
@@ -383,7 +402,7 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(
             {path.name for path in first.iterdir()},
             {
-                "platform.json", "network.json", "ports.md", "unenforced-limits.json", "gateway", "grafana",
+                "platform.json", "network.json", "ports.md", "unenforced-limits.json", "gateway", "grafana", "backends",
                 "mimir-overrides.yaml", "loki-overrides.yaml", "tempo-overrides.yaml", "pyroscope-overrides.yaml",
             },
         )

@@ -230,11 +230,18 @@ class Gateway:
 
 
 @dataclass(frozen=True)
+class Grafana:
+    hostname: str
+    admin_secret_ref: str
+
+
+@dataclass(frozen=True)
 class Platform:
     schema_version: int
     deployment: str
     profile: str
     gateway: Gateway
+    grafana: Grafana
     storage_provider: str
     bindings: dict[str, StorageBinding]
     secrets: dict[str, SecretReference]
@@ -325,7 +332,9 @@ UPSTREAM_SIGNAL = {
     "metrics": "metrics", "logs": "logs", "profiles": "profiles",
     "traces.query": "traces", "traces.otlp_grpc": "traces", "traces.otlp_http": "traces",
 }
-UPSTREAM_DESTINATION = {"metrics": "mimir", "logs": "loki", "traces": "tempo", "profiles": "pyroscope"}
+UPSTREAM_DESTINATION = {
+    "metrics": "mimir", "logs": "loki", "traces": "tempo", "profiles": "pyroscope", "grafana": "grafana",
+}
 
 
 def _gateway(
@@ -497,8 +506,15 @@ def load_platform(
     trust_refs = {gateway.client_ca_secret_ref, gateway.client_ca_key_secret_ref}
     if (used_secrets | storage_refs) & trust_refs:
         raise ConfigurationError("gateway CA references must not reuse credential or object-storage secrets")
+    raw_grafana = mapping(data["grafana"])
+    grafana = Grafana(string(raw_grafana["hostname"]), string(raw_grafana["admin_secret_ref"]))
+    if grafana.hostname == gateway.hostname:
+        raise ConfigurationError("grafana: hostname must differ from the gateway hostname")
+    _require_secret(grafana.admin_secret_ref, secrets, "grafana")
+    if grafana.admin_secret_ref in used_secrets | storage_refs | trust_refs:
+        raise ConfigurationError("grafana: admin_secret_ref must not reuse another secret")
     return Platform(
-        1, deployment, string(data["profile"]), gateway, provider, bindings, secrets,
+        1, deployment, string(data["profile"]), gateway, grafana, provider, bindings, secrets,
         tuple(sorted(streams, key=lambda stream: (stream.tenant, stream.datastream))),
         tuple(sorted(credentials, key=lambda credential: credential.id)),
     )

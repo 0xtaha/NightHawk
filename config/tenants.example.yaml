@@ -10,6 +10,7 @@ gateway:
   client_ca_key_secret_ref: gateway-client-ca-key
   auth_service: http://authz:9180
   upstreams:
+    grafana: http://grafana:3000
     metrics: http://mimir:8080
     logs: http://loki:3100
     traces:
@@ -18,6 +19,9 @@ gateway:
       otlp_http: http://tempo:4318
     profiles: http://pyroscope:4040
   revoked_certificate_fingerprints: []
+grafana:
+  hostname: grafana.nighthawk.internal
+  admin_secret_ref: grafana-admin
 storage:
   provider: seaweedfs
   bindings:
@@ -69,6 +73,7 @@ secrets:
   pyroscope-storage: {file: secrets/local.sops.yaml, key: pyroscope-storage}
   gateway-client-ca: {file: secrets/local.sops.yaml, key: gateway-client-ca}
   gateway-client-ca-key: {file: secrets/local.sops.yaml, key: gateway-client-ca-key}
+  grafana-admin: {file: secrets/local.sops.yaml, key: grafana-admin}
   example-ingest: {file: secrets/local.sops.yaml, key: example-ingest}
   example-query: {file: secrets/local.sops.yaml, key: example-query}
 credentials:

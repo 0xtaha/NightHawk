@@ -1,0 +1,34 @@
+# Override for a platform document whose storage provider is an external S3 service.
+# Use with: -f docker-compose.yaml -f docker-compose.s3.yaml
+# Removes local object storage; backends keep the system trust store and take the S3 keys
+# from the same per-backend env files.
+
+x-external-storage: &external-storage
+  environment: !reset {}
+  networks: !override [backend, egress]
+  depends_on: !override
+    volume-init: {condition: service_completed_successfully}
+
+services:
+  seaweedfs: !reset null
+  storage-init: !reset null
+  volume-init:
+    volumes: !override
+      - mimir-data:/volumes/mimir
+      - loki-data:/volumes/loki
+      - tempo-data:/volumes/tempo
+      - pyroscope-data:/volumes/pyroscope
+      - grafana-data:/volumes/grafana
+      - alloy-data:/volumes/alloy
+  mimir: *external-storage
+  loki: *external-storage
+  tempo: *external-storage
+  pyroscope: *external-storage
+
+networks:
+  storage: !reset null
+  # Backends need a route out to the external S3 endpoint.
+  egress: {}
+
+volumes:
+  seaweedfs-data: !reset null

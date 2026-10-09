@@ -33,16 +33,18 @@ class Profile:
     requires_certificate: bool = False
     self_monitoring: bool = False
     privileged: bool = False
+    # Accepts profiles pushed by application SDKs.
+    sdk_profiles: bool = True
 
 
 PROFILES = {
     "docker": Profile(self_monitoring=True),
-    "k8s-node": Profile(),
+    "k8s-node": Profile(sdk_profiles=False),
     "k8s-cluster": Profile(self_monitoring=True),
     "remote-cluster": Profile(requires_certificate=True),
     "vm": Profile(requires_certificate=True),
     "external-service": Profile(requires_certificate=True),
-    "profiling-ebpf": Profile(privileged=True),
+    "profiling-ebpf": Profile(privileged=True, sdk_profiles=False),
 }
 
 
@@ -238,6 +240,7 @@ def _otlp(base: str, credential: Credential, signals: list[str], pattern: str, w
     body = (
         "\n      // Best effort on string bodies; the whole key/value match is replaced."
         f'\n      `replace_pattern(log.body, "(?i)\\\\b({pattern})\\\\s*[=:]\\\\s*(\\"[^\\"]*\\"|[^\\\\s,;&]+)", "[REDACTED]") where IsString(log.body)`,'
+        f'\n      `replace_pattern(log.body, "(?i)\\"({pattern})\\"\\\\s*:\\\\s*(\\"[^\\"]*\\"|[^,}}\\\\s]+)", "[REDACTED]") where IsString(log.body)`,'
     )
     transform = ""
     if "traces" in signals:
@@ -281,11 +284,18 @@ otelcol.processor.transform "redact" {{
   }}
 }}
 
+// Alloy 1.20.1 fails to build this component with a client_auth block in any form
+// ("no credential source provided"), although `alloy validate` accepts it. The top-level
+// arguments work. The secret comes from local.file, which also picks up a rotated file;
+// the file must hold the secret without a trailing newline.
+local.file "gateway_credential" {{
+  filename  = {CREDENTIAL_FILE}
+  is_secret = true
+}}
+
 otelcol.auth.basic "gateway" {{
-  client_auth {{
-    username      = {_quote(credential.id)}
-    password_file = {CREDENTIAL_FILE}
-  }}
+  username = {_quote(credential.id)}
+  password = local.file.gateway_credential.content
 }}
 
 otelcol.exporter.otlphttp "gateway" {{
@@ -313,9 +323,19 @@ otelcol.exporter.otlphttp "gateway" {{
 """
 
 
-def _profiles(base: str, credential: Credential, pattern: str, with_certificate: bool) -> str:
+def _profiles(base: str, credential: Credential, pattern: str, with_certificate: bool, sdk: bool) -> str:
+    receiver = """
+// Applications push profiles here with a Pyroscope SDK.
+pyroscope.receive_http "sdk" {
+  http {
+    listen_address = "0.0.0.0"
+    listen_port    = 4040
+  }
+  forward_to = [pyroscope.relabel.redact.receiver]
+}
+""" if sdk else ""
     return f"""
-// ---- profiles ----
+// ---- profiles ----{receiver}
 pyroscope.relabel "redact" {{
   forward_to = [pyroscope.write.gateway.receiver]
 
@@ -359,7 +379,7 @@ def _monitored_targets(platform: Platform) -> list[tuple[str, str]]:
 def render_collector(
     platform: Platform, tenant: str, datastream: str, profile_name: str, *,
     entry_point: str | None = None, credential_id: str | None = None, self_monitoring: bool = False,
-    configs: Path = ALLOY_CONFIGS,
+    otlp_only: bool = False, configs: Path = ALLOY_CONFIGS,
 ) -> dict[str, str]:
     """Return the collector's files by name. Nothing is written here."""
     profile = PROFILES.get(profile_name)
@@ -377,6 +397,8 @@ def render_collector(
                 f"{tenant}/{datastream}: privileged profiling needs allow_privileged_profiling: true and the profiles signal"
             )
         signals = ["profiles"]
+    if otlp_only and not profile.sdk_profiles:
+        raise ConfigurationError(f"the {profile_name} profile has only host sources; it cannot be rendered OTLP-only")
     if self_monitoring and (not profile.self_monitoring or "metrics" not in signals):
         raise ConfigurationError(
             "self-monitoring is available only for the docker and k8s-cluster profiles on a datastream that enables metrics"
@@ -393,7 +415,8 @@ def render_collector(
     pattern = _alternation(stream.drop_fields)
 
     files: dict[str, str] = {}
-    for signal in signals:
+    # OTLP-only: no host discovery or scraping, so no runtime socket, host mount, or privilege.
+    for signal in [] if otlp_only else signals:
         source = configs / profile_name / f"{signal}.alloy"
         if source.exists():
             files[source.name] = source.read_text(encoding="utf-8")
@@ -412,7 +435,7 @@ def render_collector(
     if otlp:
         generated += _otlp(base, credential, otlp, pattern, with_certificate)
     if "profiles" in signals:
-        generated += _profiles(base, credential, pattern, with_certificate)
+        generated += _profiles(base, credential, pattern, with_certificate, profile.sdk_profiles)
     # `alloy fmt` indents with tabs; emit the same so the generated file is format-clean.
     files["datastream.alloy"] = "".join(
         "\t" * ((len(line) - len(line.lstrip(" "))) // 2) + line.lstrip(" ")
