@@ -1,0 +1,87 @@
+{{- if .Values.enabled.authz }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: authz
+  labels: {{- include "nighthawk.labels" . | nindent 4 }}
+spec:
+  selector: {{- include "nighthawk.component" "auth-service" | nindent 4 }}
+  ports:
+    - {name: http, port: 9180, targetPort: 9180}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: authz
+  labels: {{- include "nighthawk.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.authz.replicas }}
+  selector:
+    matchLabels: {{- include "nighthawk.component" "auth-service" | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nighthawk.labels" . | nindent 8 }}
+        {{- include "nighthawk.component" "auth-service" | nindent 8 }}
+      annotations:
+        # A changed platform document changes the policy, so it restarts the service.
+        nighthawk.io/platform-checksum: {{ index .Values.files "platform" "platform.yaml" | sha256sum }}
+    spec:
+      serviceAccountName: authz
+      automountServiceAccountToken: false
+      {{- include "nighthawk.podSecurity" . | nindent 6 }}
+      {{- if gt (int .Values.authz.replicas) 1 }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels: {{- include "nighthawk.component" "auth-service" | nindent 14 }}
+      {{- end }}
+      initContainers:
+        # The policy holds digests, never a credential. It is derived here from the
+        # synchronized credentials and exists only in this pod's memory-backed volume.
+        - name: policy
+          image: {{ .Values.images.platform | quote }}
+          args:
+            - render-gateway-policy
+            - --config=/etc/nighthawk/platform/platform.yaml
+            - --secrets-dir=/run/nighthawk/secrets
+            - --output=/run/nighthawk/authz/policy.json
+          {{- include "nighthawk.containerSecurity" . | nindent 10 }}
+          volumeMounts:
+            - {name: platform, mountPath: /etc/nighthawk/platform, readOnly: true}
+            - {name: secrets, mountPath: /run/nighthawk/secrets/kv, readOnly: true}
+            - {name: policy, mountPath: /run/nighthawk/authz}
+      containers:
+        - name: authz
+          image: {{ .Values.images.platform | quote }}
+          args: ["serve-authz", "--policy=/run/nighthawk/authz/policy.json", "--listen=0.0.0.0:9180"]
+          ports:
+            - {name: http, containerPort: 9180}
+          readinessProbe:
+            httpGet: {path: /healthz, port: 9180}
+            periodSeconds: 5
+          {{- include "nighthawk.containerSecurity" . | nindent 10 }}
+          resources: {{- toYaml (.Values.resources.authz | default dict) | nindent 12 }}
+          volumeMounts:
+            - {name: policy, mountPath: /run/nighthawk/authz, readOnly: true}
+      volumes:
+        - name: platform
+          configMap: {name: nighthawk-platform}
+        - name: policy
+          emptyDir: {medium: Memory}
+        {{- include "nighthawk.secretsVolume" (dict "root" . "name" "authz") | nindent 8 }}
+{{- if gt (int .Values.authz.replicas) 1 }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: authz
+  labels: {{- include "nighthawk.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: {{- include "nighthawk.component" "auth-service" | nindent 6 }}
+{{- end }}
+{{- end }}

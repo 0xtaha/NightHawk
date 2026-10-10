@@ -1,0 +1,19 @@
+# Installs the rendered releases in order. A release is only started after the one before it
+# is healthy, and a failure names the release and the workloads that are not ready.
+- name: Check the rendered deployment against this cluster
+  ansible.builtin.import_tasks: check.yml
+
+- name: Read where the cluster API is
+  ansible.builtin.import_tasks: cluster_api.yml
+
+- name: Install each release in order
+  ansible.builtin.include_tasks: release.yml
+  loop: "{{ k8s_platform_releases.releases }}"
+  loop_control:
+    loop_var: k8s_platform_release
+    label: "{{ k8s_platform_release.name }}"
+
+- name: State what this installation is
+  ansible.builtin.debug:
+    msg: "{{ k8s_platform_releases.notice }}"
+  when: k8s_platform_releases.notice | length > 0

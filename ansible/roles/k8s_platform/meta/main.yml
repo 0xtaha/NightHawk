@@ -1,0 +1,11 @@
+galaxy_info:
+  role_name: k8s_platform
+  namespace: nighthawk
+  author: NightHawk
+  description: Installs the NightHawk platform releases on a Kubernetes cluster from the control machine.
+  license: Proprietary
+  min_ansible_version: "2.21"
+  platforms:
+    - name: Ubuntu
+      versions: [jammy, noble]
+dependencies: []

@@ -5,11 +5,13 @@
 > **Amendment:** This section and "Access and execution boundaries" describe
 > the situation before any implementation: an empty repository, a Windows
 > host, and no verified edit access. They are kept as the plan's starting
-> point, not as the present state. Todos 1 to 5 are implemented; todos 6 to
-> 10 are not started. Accepted behaviour is in `openspec/specs/`, the history
+> point, not as the present state. Todos 1 to 5 are implemented. Todo 6 is
+> partly implemented: the development profile of self-hosted Kubernetes runs
+> on a local test cluster; its production profile and AWS/EKS are not built.
+> Todos 7 to 10 are not started. Accepted behaviour is in `openspec/specs/`, the history
 > in `openspec/changes/archive/`, and what was and was not verified in
 > `docs/01-architecture.md`, `docs/07-docker-compose.md`, and
-> `docs/08-ansible.md`. In short: the Docker Compose profile runs end to end
+> `docs/08-ansible.md`, and `docs/09-kubernetes.md`. In short: the Docker Compose profile runs end to end
 > on one machine under rootless Podman; the AWS infrastructure is validated
 > as plans only and nothing has been applied; the Ansible automation is
 > tested role by role in containers and has never run on a real host. The
@@ -273,6 +275,39 @@ Include Kafka where required, Cluster Autoscaler on AWS, metrics-server for HPA,
 
 Document small/medium/large resource budgets including Kafka, object storage, shared database, replication, and disk throughput. Keep production and reduced-footprint development values visibly distinct.
 
+> **Amendment: what todo 6 has delivered so far.** The development profile
+> of self-hosted Kubernetes, documented in `docs/09-kubernetes.md`:
+>
+> - **Rendering:** `render-contracts` writes Helm values, an ordered release
+>   list, and what Vault must allow for a cluster.
+> - **Orchestration:** Ansible playbooks (`k8s-addons.yml`,
+>   `k8s-platform.yml`, `k8s-teardown.yml`) run a pinned, checksum-verified
+>   Helm from the control machine. Every upstream chart is locked by the
+>   digest of its package, and every image the profile runs is pinned by
+>   digest.
+> - **Secrets:** the decision deferred from the Vault amendment is made.
+>   Workloads get secrets through the Vault Secrets Operator and
+>   certificates through cert-manager from Vault's PKI, each as its own
+>   service account. No Vault credential is stored in the cluster. The
+>   cluster therefore reads Vault, read-only and per workload; the
+>   command-line tool remains the only writer.
+> - **Workloads:** a small platform chart; SeaweedFS and monolithic Mimir
+>   and Tempo from it with the configuration verified under Compose; Loki,
+>   Pyroscope, Grafana, and Traefik from their upstream charts. The gateway
+>   has a namespace of its own.
+> - **Network:** default-deny NetworkPolicies in both platform namespaces,
+>   every allowance generated from a rule of the network contract, which now
+>   lists the in-cluster flows (62 rules).
+> - **Verified:** an acceptance suite installs the profile on a local
+>   single-node cluster and checks all four signals, tenant boundaries,
+>   network isolation, secret delivery and rotation, and that data survives
+>   a teardown.
+>
+> **Not delivered:** the production profile (distributed charts, Kafka
+> through Strimzi, replicated SeaweedFS, shared PostgreSQL, Longhorn,
+> disruption budgets, topology spread, autoscaling, resource budgets), and
+> everything for AWS/EKS. Nothing has run on the k3s cluster of todo 5.
+
 ### 7. Provision dashboards and alerting
 
 Ship cluster health, node health, Mimir/Loki/Tempo self-monitoring, and golden-signals dashboards, with supplemental Alloy, Pyroscope, Kafka, storage, and gateway health coverage.
@@ -328,17 +363,17 @@ Explain maintenance, upgrades, certificate and secret rotation, Kafka recovery, 
 
 Verify commands against implemented targets. The Docker quickstart has an explicit prerequisites/download-speed/resource assumption and a measured cold/warm-start check against the brief's startup target; do not claim the target without measurement.
 
-> **Amendment: recorded deferrals.** A comparison of todos 1 to 5 with the
+> **Amendment: recorded deferrals.** A comparison of todos 1 to 6 with the
 > repository found items those todos name that are deliberately not built
 > or not verified yet. Each is owned by a later todo:
 >
 > | Item | Named in | Owned by | Why later |
 > | --- | --- | --- | --- |
 > | Verification of the host automation on real machines | todo 5 | open | Todo 5 pinned the Ansible tooling and tested every role in containers of each supported system; no playbook has run on a real host. See `docs/08-ansible.md`, "Verification limits" |
-> | Chart lockfiles and Kubernetes image digests | todo 1 | todo 6 | There is no chart to lock until the workloads are added |
+> | The production profile of self-hosted Kubernetes: distributed backends, Kafka, replicated storage, shared PostgreSQL, Longhorn, availability settings | todo 6 | open | Todo 6 delivered the development profile only; see `docs/09-kubernetes.md` |
+> | Image digests for the add-ons only production installs (Longhorn, Strimzi, CloudNativePG) | todo 1 | with the production profile | Every chart is locked by digest, and the images of everything the development profile runs are pinned |
 > | IAM for the AWS load balancer controller | todo 2 | todo 6 | Its policy is published per controller release, and none is pinned yet |
 > | Standalone firewall-format outputs: documented UFW or iptables rule examples, AWS SG/NACL examples | conventions | todo 8 | Todo 8 owns them. Host rules are generated and applied by the Ansible `firewall` role; outside it only the port table and a JSON copy of the contract are generated |
-> | MetalLB, Longhorn, Traefik, and cert-manager on the k3s cluster | deployment profiles, todo 5 | todo 6 | Todo 5 checks their prerequisites; they are installed with the workloads that need them |
 > | An AWS example platform document | conventions | todo 6 | Nothing consumes one until the EKS workloads exist |
 > | Prerequisite checks beyond Vault and Terraform | todo 1 | todo 9 | They belong with the orchestration that needs the other tools |
 > | Modelled backups, and an expiry for old state-bucket versions | storage conventions | todo 10 | They belong with backup and restore |

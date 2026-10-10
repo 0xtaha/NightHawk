@@ -1,0 +1,161 @@
+{{- if .Values.enabled.collectors }}
+{{- $credential := .Values.collectors.credential }}
+# The collectors find what to scrape through the cluster API. Read-only, and nothing secret.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nighthawk-collector
+  labels: {{- include "nighthawk.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "nodes/metrics", "nodes/proxy", "pods", "services", "endpoints", "events", "namespaces"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - nonResourceURLs: ["/metrics", "/metrics/cadvisor"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: nighthawk-collector
+  labels: {{- include "nighthawk.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: nighthawk-collector
+subjects:
+  - kind: ServiceAccount
+    name: collector
+    namespace: {{ .Release.Namespace }}
+{{- range $kind := list "cluster" "node" }}
+{{- $name := printf "alloy-%s" $kind }}
+---
+{{- if eq $kind "cluster" }}
+# Applications push OTLP and profiles here; it also scrapes cluster-wide targets. Its
+# discovery never overlaps the node collector's.
+apiVersion: v1
+kind: Service
+metadata:
+  name: alloy
+  labels: {{- include "nighthawk.labels" $ | nindent 4 }}
+spec:
+  selector:
+    {{- include "nighthawk.component" "collector" | nindent 4 }}
+    nighthawk.io/collector: cluster
+  ports:
+    - {name: otlp-grpc, port: 4317, targetPort: 4317}
+    - {name: otlp-http, port: 4318, targetPort: 4318}
+    - {name: profiles, port: 4040, targetPort: 4040}
+---
+apiVersion: apps/v1
+kind: Deployment
+{{- else }}
+# One per node: that node's kubelet, containers, and pod logs only.
+apiVersion: apps/v1
+kind: DaemonSet
+{{- end }}
+metadata:
+  name: {{ $name }}
+  labels: {{- include "nighthawk.labels" $ | nindent 4 }}
+spec:
+  {{- if eq $kind "cluster" }}
+  replicas: 1
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "nighthawk.component" "collector" | nindent 6 }}
+      nighthawk.io/collector: {{ $kind }}
+  template:
+    metadata:
+      labels:
+        {{- include "nighthawk.labels" $ | nindent 8 }}
+        {{- include "nighthawk.component" "collector" | nindent 8 }}
+        nighthawk.io/collector: {{ $kind }}
+      annotations:
+        nighthawk.io/config-checksum: {{ index $.Values.files (printf "collector-%s" $kind) | toYaml | sha256sum }}
+    spec:
+      serviceAccountName: collector
+      automountServiceAccountToken: true
+      {{- include "nighthawk.gatewayAliases" $ | nindent 6 }}
+      securityContext:
+        # Pod logs on the node are readable by root only. No capability is kept and the
+        # root filesystem is read-only; the cluster collector needs none of this and runs unprivileged.
+        {{- if eq $kind "node" }}
+        runAsUser: 0
+        {{- else }}
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        {{- end }}
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: alloy
+          image: {{ $.Values.images.alloy | quote }}
+          args:
+            - run
+            - /etc/nighthawk/collector
+            - --storage.path=/var/lib/alloy
+            - --server.http.listen-addr=0.0.0.0:12345
+          env:
+            - name: HOSTNAME
+              valueFrom:
+                fieldRef: {fieldPath: spec.nodeName}
+            - {name: NIGHTHAWK_CREDENTIAL_FILE, value: /run/nighthawk/collector/credential}
+            - {name: NIGHTHAWK_GATEWAY_CA_FILE, value: /run/nighthawk/trust/gateway-ca.pem}
+            - {name: NIGHTHAWK_CLIENT_CERT_FILE, value: /run/nighthawk/client/tls.crt}
+            - {name: NIGHTHAWK_CLIENT_KEY_FILE, value: /run/nighthawk/client/tls.key}
+            - {name: NIGHTHAWK_GATEWAY_METRICS_ADDRESS, value: {{ $.Values.collectors.gatewayMetricsAddress | quote }}}
+          ports:
+            - {name: http, containerPort: 12345}
+          readinessProbe:
+            httpGet: {path: /-/ready, port: 12345}
+            periodSeconds: 5
+          {{- include "nighthawk.containerSecurity" $ | nindent 10 }}
+          resources: {{- toYaml ($.Values.resources.collector | default dict) | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/nighthawk/collector, readOnly: true}
+            - {name: credential, mountPath: /run/nighthawk/collector, readOnly: true}
+            - {name: trust, mountPath: /run/nighthawk/trust, readOnly: true}
+            - {name: state, mountPath: /var/lib/alloy}
+            - {name: tmp, mountPath: /tmp}
+            {{- if $.Values.collectors.clientCertificate }}
+            - {name: client, mountPath: /run/nighthawk/client, readOnly: true}
+            {{- end }}
+            {{- if eq $kind "node" }}
+            - {name: pod-logs, mountPath: /var/log/pods, readOnly: true}
+            {{- end }}
+      volumes:
+        - name: config
+          configMap: {name: nighthawk-collector-{{ $kind }}}
+        - name: credential
+          secret:
+            secretName: {{ include "nighthawk.secretName" (dict "workload" "collector" "ref" $credential.ref) }}
+            defaultMode: 0440
+            items: [{key: {{ $credential.key }}, path: credential}]
+        - name: trust
+          secret:
+            secretName: {{ $.Values.collectors.trustSecret }}
+            items: [{key: ca.crt, path: gateway-ca.pem}]
+        - name: state
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        {{- if $.Values.collectors.clientCertificate }}
+        - name: client
+          secret:
+            secretName: {{ $.Values.collectors.clientCertificate }}
+            defaultMode: 0440
+        {{- end }}
+        {{- if eq $kind "node" }}
+        - name: pod-logs
+          hostPath: {path: /var/log/pods}
+        {{- end }}
+{{- end }}
+{{- end }}

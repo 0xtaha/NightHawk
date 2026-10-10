@@ -29,6 +29,37 @@ class VersionsTests(unittest.TestCase):
         self.assertEqual(matrix["schema_version"], 1)
         self.assertIn("loki", matrix["backends"])
 
+    def test_every_chart_is_locked_by_digest_and_agrees_with_the_pin_it_names(self) -> None:
+        charts = load_versions()["helm_charts"]
+        self.assertGreaterEqual(len(charts), 13)
+        for name, chart in charts.items():
+            self.assertRegex(chart["sha256"], r"^[0-9a-f]{64}$", name)
+            self.assertTrue(chart["repository"].startswith("https://"), name)
+        document = copy.deepcopy(self.matrix)
+        del document["helm_charts"]["loki"]["sha256"]
+        with self.assertRaisesRegex(ConfigurationError, "'sha256' is a required property"):
+            load_versions(self.write(document))
+
+    def test_chart_version_that_differs_from_its_pin_is_named(self) -> None:
+        document = copy.deepcopy(self.matrix)
+        document["helm_charts"]["metallb"]["version"] = "0.16.0"
+        with self.assertRaisesRegex(ConfigurationError, "helm_charts.metallb.version is 0.16.0 but kubernetes_platform.metallb.version pins 0.16.1"):
+            load_versions(self.write(document))
+        document = copy.deepcopy(self.matrix)
+        document["kubernetes_platform"]["traefik"]["version"] = "3.7.14"
+        with self.assertRaisesRegex(ConfigurationError, "helm_charts.traefik.app_version is 3.7.13 but kubernetes_platform.traefik.version pins 3.7.14"):
+            load_versions(self.write(document))
+        document = copy.deepcopy(self.matrix)
+        document["helm_charts"]["loki"]["version_of"] = "grafana_charts.nothing.version"
+        with self.assertRaisesRegex(ConfigurationError, "names grafana_charts.nothing.version, which the matrix does not have"):
+            load_versions(self.write(document))
+
+    def test_only_listed_components_are_horizontally_scalable(self) -> None:
+        scalable = load_versions()["kubernetes_scaling"]["horizontally_scalable"]
+        self.assertIn("gateway", scalable)
+        for stateful in ("mimir-ingester", "loki-ingester", "tempo-ingester", "kafka", "object-storage", "database"):
+            self.assertNotIn(stateful, scalable)
+
     def test_load_versions_rejects_unknown_field(self) -> None:
         document = copy.deepcopy(self.matrix)
         document["backends"]["loki"]["unexpected_field"] = "oops"

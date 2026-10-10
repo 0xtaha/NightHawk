@@ -1,0 +1,93 @@
+# Every value here is rendered by `python -m nighthawk render-contracts` for a self-hosted
+# Kubernetes platform document. Do not edit a rendered values file: change the platform
+# document and render again. The same chart is installed once per stage, in the order the
+# rendered releases.yaml gives; `enabled` selects the stage.
+enabled:
+  # Default deny and the contract's allowances for the namespace the release is installed in.
+  network: false
+  foundation: false
+  # The gateway's own namespace: only the identity and certificate it needs.
+  gatewayIdentity: false
+  storage: false
+  storageInit: false
+  backends: false
+  authz: false
+  provision: false
+  collectors: false
+
+# development or production. Development is a single node without high availability.
+profile: development
+
+# Images by digest, from the compatibility matrix. `platform` is the NightHawk image the
+# operator supplies in the inventory.
+images:
+  platform: ""
+  seaweedfs: ""
+  mimir: ""
+  tempo: ""
+  alloy: ""
+
+vault:
+  # The address the cluster reaches Vault at.
+  address: ""
+  kvMount: ""
+  authMount: ""
+  # How often a synchronized secret is read again. A rotated secret reaches its workloads
+  # within this period.
+  refreshAfter: 60s
+  # Optional: name of a Secret holding `ca.crt` for a Vault whose certificate is privately signed.
+  caCertSecret: ""
+
+# One entry per workload identity: name, Vault role, and the secrets it reads.
+workloads: []
+
+pki:
+  mount: ""
+  serverRole: ""
+  clientRole: ""
+  issuerRole: ""
+  issuerServiceAccount: certificate-issuer
+  # Namespace and service account of the certificate manager, which asks for the issuer's token.
+  certManagerNamespace: cert-manager
+  certManagerServiceAccount: cert-manager
+
+# Certificates requested from the cluster's certificate manager.
+certificates: []
+
+gateway:
+  hostname: ""
+  grafanaHostname: ""
+  clusterPort: 0
+
+# Pods reach the gateway by the host names its certificate carries. The deployment sets the
+# address of the gateway's in-cluster service here once the gateway exists.
+hostAliases: []
+
+# Non-secret files, by group and file name, mounted into the workloads that read them.
+files: {}
+
+storage:
+  size: 10Gi
+  storageClass: ""
+  secrets: []
+
+backends: {}
+
+authz:
+  replicas: 1
+
+grafana:
+  url: http://grafana:3000
+  provisionArguments: []
+
+collectors:
+  privileged: false
+
+resources: {}
+
+# One entry per component, rendered from the network contract. See templates/network.yaml.
+networkPolicies: []
+# The cluster API is not a pod. The deployment reads its addresses and port from the cluster.
+clusterApi:
+  addresses: []
+  port: 6443

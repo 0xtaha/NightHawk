@@ -1,0 +1,53 @@
+# An upstream chart is used only if its package has the digest the compatibility matrix locks.
+- name: Create the chart cache for this chart
+  ansible.builtin.file:
+    path: "{{ k8s_platform_chart_cache }}/{{ k8s_platform_chart_key }}-{{ k8s_platform_chart.version }}"
+    state: directory
+    mode: "0755"
+
+- name: Look for the chart package
+  ansible.builtin.find:
+    paths: "{{ k8s_platform_chart_cache }}/{{ k8s_platform_chart_key }}-{{ k8s_platform_chart.version }}"
+    patterns: "*.tgz"
+    get_checksum: true
+    checksum_algorithm: sha256
+  register: k8s_platform_chart_found
+
+- name: Pull the chart at its pinned version
+  ansible.builtin.command:
+    argv:
+      - "{{ k8s_platform_helm }}"
+      - pull
+      - "{{ k8s_platform_chart.chart }}"
+      - --repo={{ k8s_platform_chart.repository }}
+      - --version={{ k8s_platform_chart.version }}
+      - --destination={{ k8s_platform_chart_cache }}/{{ k8s_platform_chart_key }}-{{ k8s_platform_chart.version }}
+  changed_when: true
+  when: k8s_platform_chart_found.matched == 0
+
+- name: Read the package's digest
+  ansible.builtin.find:
+    paths: "{{ k8s_platform_chart_cache }}/{{ k8s_platform_chart_key }}-{{ k8s_platform_chart.version }}"
+    patterns: "*.tgz"
+    get_checksum: true
+    checksum_algorithm: sha256
+  register: k8s_platform_chart_package
+  # In a dry run on a new control machine nothing was pulled.
+  when: not (ansible_check_mode and k8s_platform_chart_found.matched == 0)
+
+- name: Refuse a chart whose content is not the locked one
+  ansible.builtin.assert:
+    that:
+      - k8s_platform_chart_package.matched == 1
+      - k8s_platform_chart_package.files[0].checksum == k8s_platform_chart.sha256
+    fail_msg: >-
+      The chart {{ k8s_platform_chart.chart }} {{ k8s_platform_chart.version }} from {{ k8s_platform_chart.repository }}
+      has the digest {{ (k8s_platform_chart_package.files | default([{'checksum': 'unknown'}]) | first).checksum }},
+      not the locked {{ k8s_platform_chart.sha256 }}. Nothing was installed from it.
+    quiet: true
+  when: k8s_platform_chart_package is not skipped
+
+- name: Use the verified package
+  ansible.builtin.set_fact:
+    k8s_platform_chart_ref: "{{ k8s_platform_chart_package.files[0].path }}"
+  when: k8s_platform_chart_package is not skipped

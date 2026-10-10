@@ -1,0 +1,12 @@
+# Remove the platform's releases from a cluster. Volumes are kept. To delete them too:
+#   -e k8s_platform_purge=true -e k8s_platform_purge_confirm=<nighthawk_cluster_name>
+- name: Tear down the platform
+  hosts: k3s_servers[0]
+  connection: local
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Remove the releases, keeping volumes unless a purge is confirmed
+      ansible.builtin.include_role:
+        name: k8s_platform
+        tasks_from: teardown

@@ -330,6 +330,34 @@ class ConfigurationTests(unittest.TestCase):
         del self.data["vault"]
         self.assert_invalid("'vault' is a required property")
 
+    def test_cluster_authentication_is_declared_for_self_hosted_kubernetes_only(self) -> None:
+        self.data["vault"]["kubernetes_auth"] = {"mount": "nighthawk-k8s"}
+        self.assert_invalid("kubernetes_auth applies to a self-hosted-k8s deployment only, not docker")
+        self.data["deployment"] = "self-hosted-k8s"
+        vault = load_platform(self.write()).vault
+        self.assertEqual((vault.kubernetes_auth_mount, vault.cluster_address), ("nighthawk-k8s", None))
+        self.assertEqual(vault.address_in_cluster, vault.address)
+        self.data["vault"]["kubernetes_auth"]["cluster_address"] = "http://vault.vault-dev.svc:8200"
+        vault = load_platform(self.write()).vault
+        self.assertEqual(vault.address_in_cluster, "http://vault.vault-dev.svc:8200")
+        # A document without it is still valid, and has nothing for a cluster to authenticate with.
+        del self.data["vault"]["kubernetes_auth"]
+        self.assertIsNone(load_platform(self.write()).vault.kubernetes_auth_mount)
+
+    def test_cluster_authentication_refusals(self) -> None:
+        self.data["deployment"] = "self-hosted-k8s"
+        for mount in ("nighthawk-kv", "nighthawk-pki"):
+            self.data["vault"]["kubernetes_auth"] = {"mount": mount}
+            self.assert_invalid("kubernetes_auth.mount must differ from kv_mount and pki.mount")
+        self.data["vault"]["kubernetes_auth"] = {"mount": "nighthawk-k8s", "token": "s.not-allowed"}
+        self.assert_invalid("Additional properties are not allowed")
+        self.data["vault"]["kubernetes_auth"] = {"cluster_address": "https://vault.example.com"}
+        self.assert_invalid("'mount' is a required property")
+        self.data["profile"] = "production"
+        self.data["vault"]["address"] = "https://vault.example.com:8200"
+        self.data["vault"]["kubernetes_auth"] = {"mount": "nighthawk-k8s", "cluster_address": "http://vault.vault.svc:8200"}
+        self.assert_invalid("production refuses the plaintext kubernetes_auth.cluster_address")
+
     def test_plaintext_vault_address_is_loopback_only(self) -> None:
         for address in ("http://vault.example.com:8200", "http://10.0.0.5:8200"):
             with self.subTest(address=address):

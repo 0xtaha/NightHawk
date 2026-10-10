@@ -1,0 +1,11 @@
+galaxy_info:
+  role_name: k8s_addons
+  namespace: nighthawk
+  author: NightHawk
+  description: Installs the pinned cluster add-ons the NightHawk platform needs, from digest-verified charts.
+  license: Proprietary
+  min_ansible_version: "2.21"
+  platforms:
+    - name: Ubuntu
+      versions: [jammy, noble]
+dependencies: []

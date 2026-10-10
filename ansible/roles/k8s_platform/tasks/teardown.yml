@@ -1,0 +1,56 @@
+# Removes the platform's releases, last installed first. Persistent volumes, and with them
+# stored telemetry and Grafana's state, are kept unless a purge is confirmed with the
+# cluster's name. Secrets stay in Vault either way; nothing here touches Vault.
+- name: Refuse a purge that is not confirmed by name
+  ansible.builtin.assert:
+    that: >-
+      not (k8s_platform_purge | bool)
+      or (k8s_platform_cluster_name | length > 0 and k8s_platform_purge_confirm == k8s_platform_cluster_name)
+    fail_msg: >-
+      A purge deletes every volume of the platform on this cluster, and with them all stored telemetry.
+      Confirm it with `-e k8s_platform_purge_confirm=<nighthawk_cluster_name>`. Nothing was deleted.
+    quiet: true
+
+- name: Remove each release, last installed first
+  kubernetes.core.helm:
+    kubeconfig: "{{ k8s_platform_kubeconfig }}"
+    binary_path: "{{ k8s_platform_helm }}"
+    name: "{{ item.name }}"
+    release_namespace: "{{ item.namespace }}"
+    state: absent
+    wait: true
+  loop: "{{ k8s_platform_releases.releases | selectattr('kind', 'equalto', 'release') | reverse | list }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Remove the last provisioning job
+  kubernetes.core.k8s:
+    kubeconfig: "{{ k8s_platform_kubeconfig }}"
+    api_version: batch/v1
+    kind: Job
+    namespace: "{{ item.namespace }}"
+    name: "{{ item.job }}"
+    state: absent
+  loop: "{{ k8s_platform_releases.releases | selectattr('kind', 'equalto', 'job') | list }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Delete the platform's namespaces, and with them every volume
+  kubernetes.core.k8s:
+    kubeconfig: "{{ k8s_platform_kubeconfig }}"
+    api_version: v1
+    kind: Namespace
+    name: "{{ item }}"
+    state: absent
+    wait: true
+    wait_timeout: 300
+  loop:
+    - "{{ k8s_platform_releases.namespace }}"
+    - "{{ k8s_platform_releases.gateway_namespace }}"
+  when: k8s_platform_purge | bool
+
+- name: Say what was kept
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Deleted the platform and every volume it had on this cluster.' if k8s_platform_purge | bool
+         else 'Removed the platform releases. Volumes, and the telemetry on them, were kept; network policies stay in place.' }}

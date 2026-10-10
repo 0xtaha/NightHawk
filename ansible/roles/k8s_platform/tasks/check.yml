@@ -1,0 +1,30 @@
+- name: Look for the rendered deployment on the control machine
+  ansible.builtin.stat:
+    path: "{{ k8s_platform_rendered_dir }}/releases.yaml"
+  register: k8s_platform_rendered
+
+- name: Refuse to deploy what was not rendered
+  ansible.builtin.assert:
+    that: k8s_platform_rendered.stat.exists
+    fail_msg: >-
+      {{ k8s_platform_rendered_dir }}/releases.yaml not found. Run `python -m nighthawk render-contracts`
+      for the self-hosted platform document and point nighthawk_k8s_rendered_dir at its kubernetes
+      directory. Nothing was installed.
+    quiet: true
+
+- name: Refuse a profile the cluster's shape cannot run
+  ansible.builtin.assert:
+    that: k8s_platform_releases.profile == k8s_platform_shape
+    fail_msg: >-
+      The deployment was rendered for the {{ k8s_platform_releases.profile }} profile, but this cluster is
+      declared as the {{ k8s_platform_shape }} shape. Render a platform document whose profile matches,
+      or correct k3s_cluster_shape. Nothing was installed.
+    quiet: true
+
+- name: Require the platform's own image
+  ansible.builtin.assert:
+    that: "'@sha256:' in k8s_platform_image or k8s_platform_releases.profile == 'development'"
+    fail_msg: >-
+      nighthawk_image must name the platform's image by digest, as the cluster can pull it, for example
+      registry.example.com/nighthawk@sha256:... . Nothing was installed.
+    quiet: true

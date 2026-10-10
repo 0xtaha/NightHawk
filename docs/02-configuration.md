@@ -16,15 +16,17 @@ with the compatibility matrix.
 `quickstart-docker` starts the whole platform with Docker Compose
 ([quickstart](00-quickstart.md)). Gateway enforcement, redaction, override
 loading, and persistence have been observed on that stack under rootless
-Podman; retention deletion has not. Kubernetes deployment is not implemented. See
+Podman; retention deletion has not. The development profile of self-hosted Kubernetes
+is implemented ([Kubernetes](09-kubernetes.md)); its production profile and AWS are not. See
 [collection](04-collection.md), [gateway](05-gateway.md), and
 [tenant provisioning](06-tenant-provisioning.md).
 `render-docker-deployment`, `generate-cluster-token`, and
 `check-cluster-layout` serve the [host and cluster automation](08-ansible.md).
 The network contract covers the gateway entry points, the flows behind the
-gateway, SSH administration, and the node-to-node flows of a k3s cluster. The
-host firewall role opens exactly its inbound rules per host role. It is not
-a Kubernetes NetworkPolicy set; that belongs with the workloads.
+gateway, SSH administration, the node-to-node flows of a k3s cluster, and
+the flows between workloads inside a cluster. The host firewall role opens
+exactly its inbound rules per host role, and the Kubernetes NetworkPolicies
+are generated from its in-cluster rules ([Kubernetes](09-kubernetes.md#network-isolation)).
 
 ## Prerequisites
 
@@ -65,8 +67,12 @@ skipped, with the reason, when it is absent. To download it into the ignored
 
 ```console
 $ python -m nighthawk fetch-tools
-Installed terraform into /path/to/NightHawk/.tools
+Installed terraform, helm, kubectl, kubeconform into /path/to/NightHawk/.tools
 ```
+
+The same command fetches the pinned Helm, kubectl, and kubeconform that the
+[Kubernetes deployment](09-kubernetes.md) and its tests use, each kept only
+if its checksum matches the matrix.
 
 The tests look for `$NIGHTHAWK_TERRAFORM`, then `.tools/terraform`, then
 `terraform` on `PATH`. They run `terraform test` in the two storage modules,
@@ -175,6 +181,17 @@ The required `grafana` object has two fields:
 | --- | --- |
 | `hostname` | DNS name of the Grafana UI. It must differ from the gateway hostname; the gateway serves both names on the same listeners and the gateway server certificate carries both |
 | `admin_secret_ref` | Secret holding the Grafana administrator password. It must not be reused for anything else |
+
+### Vault access for a cluster
+
+Only a `self-hosted-k8s` document may have `vault.kubernetes_auth`. Its
+`mount` is the Vault mount where the cluster's service accounts
+authenticate; it must differ from the two other mounts. The optional
+`cluster_address` is the address the cluster reaches Vault at when that
+differs from `address`; a production document refuses a plaintext one. No
+credential is declared. What Vault must allow at that mount is rendered to
+`vault/kubernetes-auth.json`; see
+[Kubernetes](09-kubernetes.md#what-vault-must-allow).
 
 ### Cluster block
 

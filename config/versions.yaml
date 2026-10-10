@@ -66,6 +66,14 @@ kubernetes_platform:
     runtime_verified: false
     kafka_version: 4.3.1
     kafka_source: https://raw.githubusercontent.com/strimzi/strimzi-kafka-operator/1.2.0/kafka-versions.yaml
+  vault_secrets_operator:
+    version: 1.6.0
+    source: https://github.com/hashicorp/vault-secrets-operator/releases/tag/v1.6.0
+    runtime_verified: false
+  cloudnative_pg:
+    version: 1.30.1
+    source: https://github.com/cloudnative-pg/cloudnative-pg/releases/tag/v1.30.1
+    runtime_verified: false
   eks:
     version: "1.37"
     source: https://docs.aws.amazon.com/eks/latest/userguide/kubernetes-versions-standard.html
@@ -111,6 +119,125 @@ grafana_charts:
     app_version: 2.3.1
     source: https://artifacthub.io/packages/helm/grafana/pyroscope
     runtime_verified: false
+# Every chart a Kubernetes deployment installs, locked by the SHA-256 of the packaged chart as
+# pulled from its repository on 2026-10-10. The installation compares the digest before it
+# installs. `version_of` and `app_version_of` name the matrix entry the chart version or the
+# application it packages must equal, so a version is never stated twice without a check.
+# `started` records whether the chart was ever installed in a cluster by this project's tests.
+helm_charts:
+  metallb:
+    chart: metallb
+    repository: https://metallb.github.io/metallb
+    version: 0.16.1
+    sha256: fb06bb584fcb7856f15733b2a6a2aff5b61b5c350687e341c163ae24a5938adc
+    version_of: kubernetes_platform.metallb.version
+    started: false
+  longhorn:
+    chart: longhorn
+    repository: https://charts.longhorn.io
+    version: 1.13.0
+    sha256: e57f010d2a8bcf0da5b8b03ffecf49c5bc35ddc2663588ce8f22b7567b6133ed
+    version_of: kubernetes_platform.longhorn.version
+    started: false
+  cert_manager:
+    chart: cert-manager
+    repository: https://charts.jetstack.io
+    version: v1.21.2
+    sha256: 73a56e1728edd6c99f1f31082618c3259d279a76b7ebd3d4bdc5475c2442d34a
+    app_version: "1.21.2"
+    app_version_of: kubernetes_platform.cert_manager.version
+    started: false
+  traefik:
+    chart: traefik
+    repository: https://traefik.github.io/charts
+    version: 41.6.1
+    sha256: 1e65d46bae0ba0baef460a1d82686b50f156372865a3d7d8a85b51c3855b2ef9
+    app_version: "3.7.13"
+    app_version_of: kubernetes_platform.traefik.version
+    started: false
+  vault_secrets_operator:
+    chart: vault-secrets-operator
+    repository: https://helm.releases.hashicorp.com
+    version: 1.6.0
+    sha256: de3e0a520918fc7281b94fa060fe8d1858c5db5b8fb6b1463024268e7c4541c0
+    version_of: kubernetes_platform.vault_secrets_operator.version
+    started: false
+  strimzi:
+    chart: strimzi-kafka-operator
+    repository: https://strimzi.io/charts/
+    version: 1.2.0
+    sha256: 0f8a50b2f19bd99482f9fd6e17cf42902f72f9e594a136813ac3f0b7af422efd
+    version_of: kubernetes_platform.strimzi.version
+    started: false
+  cloudnative_pg:
+    chart: cloudnative-pg
+    repository: https://cloudnative-pg.github.io/charts
+    version: 0.29.1
+    sha256: b53d3991fe84bcf38767e7702cae78666265427a127a26fff168ab4207d2b1df
+    app_version: "1.30.1"
+    app_version_of: kubernetes_platform.cloudnative_pg.version
+    started: false
+  seaweedfs:
+    chart: seaweedfs
+    repository: https://seaweedfs.github.io/seaweedfs/helm
+    version: 4.47.0
+    sha256: 2acbffd50a9a6c336dcfc13f7f9f353e2991ee738fa74c4c438a4996460480df
+    version_of: object_storage.chart_version
+    started: false
+  grafana:
+    chart: grafana
+    repository: https://grafana-community.github.io/helm-charts
+    version: 13.3.1
+    sha256: 396f70a445c20c9616118bba981d6b179059b7324a0362820dffaa4cacee9c76
+    version_of: grafana_charts.grafana.version
+    started: false
+  loki:
+    chart: loki
+    repository: https://grafana-community.github.io/helm-charts
+    version: 18.14.0
+    sha256: ee7516f8f6c1cf355871e95c634141e01570329fb0b8b0242e3f5bdb010924ee
+    version_of: grafana_charts.loki.version
+    started: false
+  tempo_distributed:
+    chart: tempo-distributed
+    repository: https://grafana-community.github.io/helm-charts
+    version: 3.7.2
+    sha256: 3de778dc1c3de2b9c3b08d9a8d73a486f6f0a53e41c2545c4ed233cdadf6bca5
+    version_of: grafana_charts.tempo_distributed.version
+    started: false
+  mimir_distributed:
+    chart: mimir-distributed
+    repository: https://grafana.github.io/helm-charts
+    version: 6.3.0-weekly.415
+    sha256: 0d7f67c5c9ad49a1f1f06b1c1704739b499e51ee2ed660bb0f4e005ffd296a5b
+    version_of: grafana_charts.mimir_distributed.version
+    started: false
+  pyroscope:
+    chart: pyroscope
+    repository: https://grafana.github.io/helm-charts
+    version: 2.3.1
+    sha256: 769207339b0f919d25e1fab79bef90c5884b0443017b696c8a5c8a209fdb7119
+    version_of: grafana_charts.pyroscope.version
+    started: false
+# Components a HorizontalPodAutoscaler may target: stateless, with no ring ownership or local
+# write-ahead log. Nothing else is autoscaled. Grafana qualifies only with the shared database.
+kubernetes_scaling:
+  horizontally_scalable:
+    - gateway
+    - authz
+    - grafana
+    - mimir-distributor
+    - mimir-querier
+    - mimir-query-frontend
+    - loki-distributor
+    - loki-querier
+    - loki-query-frontend
+    - tempo-distributor
+    - tempo-querier
+    - tempo-query-frontend
+    - pyroscope-distributor
+    - pyroscope-querier
+    - pyroscope-query-frontend
 collectors:
   alloy:
     version: 1.20.1
@@ -155,6 +282,43 @@ container_images:
     repository: docker.io/library/python
     tag: "3.12-slim-bookworm"
     digest: sha256:2ed6491b93cd49272ee6de2b5a38440c3448360322c089fc23e370722d74179d
+# Images of the add-ons the development profile installs, by the registry manifest digest
+# resolved on 2026-10-10. The rendered add-on values set them, and a test fails on any image
+# a templated release names that is not listed here or under container_images. The add-ons
+# only the production profile installs (Longhorn, Strimzi, CloudNativePG) are not listed yet.
+kubernetes_images:
+  metallb_controller:
+    repository: quay.io/metallb/controller
+    tag: "v0.16.1"
+    digest: sha256:f51ab515de9ccd20dc3dccb093e48df8adddac019326c456f449e55ba91b6420
+  metallb_speaker:
+    repository: quay.io/metallb/speaker
+    tag: "v0.16.1"
+    digest: sha256:16561e96531e1852d5c229ad7fae6e994dcfa983ff7f4de6b6208b34a4e2ddbc
+  cert_manager_controller:
+    repository: quay.io/jetstack/cert-manager-controller
+    tag: "v1.21.2"
+    digest: sha256:70f532fd9cfde0b09d55687200942399d89838bc2d5d5b45152eb799a15912b8
+  cert_manager_webhook:
+    repository: quay.io/jetstack/cert-manager-webhook
+    tag: "v1.21.2"
+    digest: sha256:a60e2dac46dbb8a7f3df95c54ce941012f54c2fe022f0ee55aaa1ab40ed957ae
+  cert_manager_cainjector:
+    repository: quay.io/jetstack/cert-manager-cainjector
+    tag: "v1.21.2"
+    digest: sha256:c85268c64f2e0e76684bf5fe8906caff34b82523561c6affe0fae3546bd87562
+  cert_manager_startupapicheck:
+    repository: quay.io/jetstack/cert-manager-startupapicheck
+    tag: "v1.21.2"
+    digest: sha256:46e75b6866359ffb5d82624f41e3ed1c70b2994982702ced547ce5edb418a8f5
+  vault_secrets_operator:
+    repository: docker.io/hashicorp/vault-secrets-operator
+    tag: "1.6.0"
+    digest: sha256:02a79a046037925d59c6a16fa7bdbf10aff1de1228c9d787d599b272b0f0c666
+  kube_rbac_proxy:
+    repository: quay.io/brancz/kube-rbac-proxy
+    tag: "v0.18.1"
+    digest: sha256:e6a323504999b2a4d2a6bf94f8580a050378eba0900fd31335cf9df5787d9a9b
 validation_tools:
   terraform:
     version: 1.13.5
@@ -162,6 +326,24 @@ validation_tools:
       windows_amd64: 73f97943c93f268ae2c645b2a737d552175aa64d00a5c8b8f5ccc5831c033c8a
       linux_amd64: 0dbe3fcc268eb670801af6a6456799d1ae26e72e73797f6c6167e18aafd1fd9a
       linux_arm64: fc1ddcb403fb57e25bdbdceb1ef2b1a102650c01b4d65dd3410082d2ef8b4417
+  # From https://get.helm.sh/helm-v<version>-linux-<arch>.tar.gz.sha256sum, resolved 2026-10-10.
+  helm:
+    version: 4.3.0
+    sha256:
+      linux_amd64: 86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb
+      linux_arm64: 31c5794dd55c66a51e6b7d2e2ac7a114ae8b1de41ff1d9ba51748ac973b06a08
+  # The client matching the pinned Kubernetes. From https://dl.k8s.io/release/v<version>/bin/linux/<arch>/kubectl.sha256.
+  kubectl:
+    version: 1.37.1
+    sha256:
+      linux_amd64: 65691ff77eb6fa44c908b77a1082c9f092c3b9733b5cefabec0d1104890e21a8
+      linux_arm64: ff749f4b78d9c4f1ec87307df9b50119ed819e2094aa9810cb9acffc3286c8c7
+  # Validates rendered manifests against the Kubernetes schema. From the release's CHECKSUMS file.
+  kubeconform:
+    version: 0.8.0
+    sha256:
+      linux_amd64: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+      linux_arm64: 1f53fc8e81258197a35e8603054162a5af1de8c5af13746c71ab680d9534ed87
   aws_provider:
     source: hashicorp/aws
     version: 6.12.0
@@ -200,6 +382,11 @@ automation_tools:
     version: 26.9.28
     source: https://pypi.org/project/molecule-plugins/26.9.28/
     runtime_verified: false
+  # The Python client the kubernetes.core collection needs on the control machine.
+  kubernetes_client:
+    version: 37.0.1
+    source: https://pypi.org/project/kubernetes/37.0.1/
+    runtime_verified: false
   # Keyed without dots so a pin can be addressed by path; `name` is the collection's own name.
   collections:
     ansible_posix:
@@ -210,6 +397,11 @@ automation_tools:
       name: community.general
       version: 13.5.0
       source: https://galaxy.ansible.com/ui/repo/published/community/general/
+    # Helm releases and cluster resources, driven from the control machine.
+    kubernetes_core:
+      name: kubernetes.core
+      version: 6.6.0
+      source: https://galaxy.ansible.com/ui/repo/published/kubernetes/core/
     # Only the role tests use this one, through Molecule's Podman driver.
     containers_podman:
       name: containers.podman
@@ -406,3 +598,9 @@ tracked_consumers:
   - path: ansible/requirements.yml
     pattern: 'name: containers\.podman\n\s+version: "([0-9.]+)"'
     component: automation_tools.collections.containers_podman.version
+  - path: ansible/requirements.yml
+    pattern: 'name: kubernetes\.core\n\s+version: "([0-9.]+)"'
+    component: automation_tools.collections.kubernetes_core.version
+  - path: ansible/requirements-dev.txt
+    pattern: '(?m)^kubernetes==([0-9.]+)$'
+    component: automation_tools.kubernetes_client.version

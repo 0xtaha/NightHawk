@@ -1,0 +1,9 @@
+apiVersion: v2
+name: nighthawk-platform
+description: >-
+  What no upstream chart provides for a NightHawk deployment: workload identities, secret and
+  certificate requests, the auth service, object storage and monolithic backends for the
+  development profile, Grafana provisioning, and the cluster's collectors.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

@@ -19,6 +19,10 @@ SOURCE_GROUPS = {
     "cluster-node": "cluster_nodes",
     "cluster-server": "cluster_servers",
 }
+# Sources that are pods. Their connections to a node's own ports come through the cluster
+# network on that node, which the host firewall's inbound allowlists do not govern; the
+# NetworkPolicies generated from the same rules do.
+POD_SOURCES = ("collector", "cluster-operator", "gateway", "pyroscope")
 # Which inbound destinations exist on a host of each role.
 ROLE_DESTINATIONS = {
     "docker_host": ("host-ssh", "gateway"),
@@ -64,6 +68,8 @@ def firewall_rules(rules: list[dict]) -> dict[str, list[dict]]:
             if rule["destination"] not in destinations or rule["scope"] == "loopback":
                 continue
             if rule["destination"] == "gateway" and rule["scope"] != "restricted-external":
+                continue
+            if rule["source"] in POD_SOURCES:
                 continue
             if rule["source"] not in SOURCE_GROUPS:
                 raise ConfigurationError(

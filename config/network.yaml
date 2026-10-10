@@ -216,3 +216,284 @@ rules:
     purpose: Cilium health checks between cluster nodes
     scope: private
     direction: source-to-destination
+  # Flows that exist only inside a Kubernetes cluster. NetworkPolicies are generated from them.
+  - id: cluster-gateway
+    source: collector
+    destination: gateway
+    protocol: tcp
+    port: 8444
+    purpose: Authenticated HTTPS and OTLP from collectors inside the cluster
+    scope: private
+    direction: source-to-destination
+  - id: cluster-dns-udp
+    source: cluster-workload
+    destination: cluster-dns
+    protocol: udp
+    port: 53
+    purpose: Name resolution for every platform workload
+    scope: private
+    direction: source-to-destination
+  - id: cluster-dns-tcp
+    source: cluster-workload
+    destination: cluster-dns
+    protocol: tcp
+    port: 53
+    purpose: Name resolution over TCP for large answers
+    scope: private
+    direction: source-to-destination
+  - id: secret-operator-vault
+    source: secret-operator
+    destination: vault
+    protocol: tcp
+    port: 8200
+    purpose: Read-only secret synchronization from Vault; the port is the one in the platform document's Vault address, 8200 by default
+    scope: private
+    direction: source-to-destination
+  - id: certificate-manager-vault
+    source: certificate-manager
+    destination: vault
+    protocol: tcp
+    port: 8200
+    purpose: Certificate signing requests to Vault's PKI; the port follows the platform document's Vault address
+    scope: private
+    direction: source-to-destination
+  - id: operator-cluster-api
+    source: cluster-operator
+    destination: cluster-server
+    protocol: tcp
+    port: 6443
+    purpose: Kubernetes API for operators and controllers inside the cluster
+    scope: private
+    direction: source-to-destination
+  - id: collector-cluster-api
+    source: collector
+    destination: cluster-server
+    protocol: tcp
+    port: 6443
+    purpose: Kubernetes API for collector discovery and events
+    scope: private
+    direction: source-to-destination
+  - id: collector-kubelet
+    source: collector
+    destination: cluster-node
+    protocol: tcp
+    port: 10250
+    purpose: Kubelet and container metrics scraped by the node collector
+    scope: private
+    direction: source-to-destination
+  - id: backend-kafka
+    source: signal-backend
+    destination: kafka
+    protocol: tcp
+    port: 9093
+    purpose: Ingest log for backends whose production architecture needs one, over TLS
+    scope: private
+    direction: source-to-destination
+  - id: kafka-replication
+    source: kafka
+    destination: kafka
+    protocol: tcp
+    port: 9091
+    purpose: Kafka replication between brokers
+    scope: private
+    direction: source-to-destination
+  - id: kafka-controller
+    source: kafka
+    destination: kafka
+    protocol: tcp
+    port: 9090
+    purpose: Kafka controller quorum
+    scope: private
+    direction: source-to-destination
+  - id: grafana-database
+    source: grafana
+    destination: database
+    protocol: tcp
+    port: 5432
+    purpose: Shared PostgreSQL for multi-replica Grafana
+    scope: private
+    direction: source-to-destination
+  - id: object-storage-database
+    source: object-storage
+    destination: database
+    protocol: tcp
+    port: 5432
+    purpose: PostgreSQL metadata store of the object storage filer in production
+    scope: private
+    direction: source-to-destination
+  - id: database-replication
+    source: database
+    destination: database
+    protocol: tcp
+    port: 5432
+    purpose: PostgreSQL streaming replication between instances
+    scope: private
+    direction: source-to-destination
+  - id: mimir-gossip
+    source: mimir
+    destination: mimir
+    protocol: tcp
+    port: 7946
+    purpose: Mimir ring membership between its own components
+    scope: private
+    direction: source-to-destination
+  - id: mimir-internal
+    source: mimir
+    destination: mimir
+    protocol: tcp
+    port: 9095
+    purpose: Mimir gRPC between its own components
+    scope: private
+    direction: source-to-destination
+  - id: loki-gossip
+    source: loki
+    destination: loki
+    protocol: tcp
+    port: 7946
+    purpose: Loki ring membership between its own components
+    scope: private
+    direction: source-to-destination
+  - id: loki-internal
+    source: loki
+    destination: loki
+    protocol: tcp
+    port: 9095
+    purpose: Loki gRPC between its own components
+    scope: private
+    direction: source-to-destination
+  - id: tempo-gossip
+    source: tempo
+    destination: tempo
+    protocol: tcp
+    port: 7946
+    purpose: Tempo ring membership between its own components
+    scope: private
+    direction: source-to-destination
+  - id: tempo-internal
+    source: tempo
+    destination: tempo
+    protocol: tcp
+    port: 9095
+    purpose: Tempo gRPC between its own components
+    scope: private
+    direction: source-to-destination
+  - id: pyroscope-gossip
+    source: pyroscope
+    destination: pyroscope
+    protocol: tcp
+    port: 7946
+    purpose: Pyroscope ring membership between its own components
+    scope: private
+    direction: source-to-destination
+  - id: pyroscope-internal
+    source: pyroscope
+    destination: pyroscope
+    protocol: tcp
+    port: 9095
+    purpose: Pyroscope gRPC between its own components
+    scope: private
+    direction: source-to-destination
+  - id: provisioner-grafana
+    source: provisioner
+    destination: grafana
+    protocol: tcp
+    port: 3000
+    purpose: Grafana provisioning job reconciling organizations and data sources
+    scope: private
+    direction: source-to-destination
+  - id: pyroscope-metastore
+    source: pyroscope
+    destination: pyroscope
+    protocol: tcp
+    port: 9099
+    purpose: Pyroscope metastore consensus between its own components
+    scope: private
+    direction: source-to-destination
+  - id: pyroscope-cluster-api
+    source: pyroscope
+    destination: cluster-server
+    protocol: tcp
+    port: 6443
+    purpose: Kubernetes API through which the Pyroscope chart discovers its own metastore
+    scope: private
+    direction: source-to-destination
+  - id: gateway-cluster-api
+    source: gateway
+    destination: cluster-server
+    protocol: tcp
+    port: 6443
+    purpose: Kubernetes API through which the gateway watches its own certificate Secret
+    scope: private
+    direction: source-to-destination
+  - id: object-storage-master
+    source: object-storage
+    destination: object-storage
+    protocol: tcp
+    port: 9333
+    purpose: SeaweedFS master between the storage components and the bucket job
+    scope: private
+    direction: source-to-destination
+  - id: object-storage-master-grpc
+    source: object-storage
+    destination: object-storage
+    protocol: tcp
+    port: 19333
+    purpose: SeaweedFS master gRPC between the storage components and the bucket job
+    scope: private
+    direction: source-to-destination
+  - id: object-storage-filer
+    source: object-storage
+    destination: object-storage
+    protocol: tcp
+    port: 8888
+    purpose: SeaweedFS filer between the storage components and the bucket job
+    scope: private
+    direction: source-to-destination
+  - id: object-storage-filer-grpc
+    source: object-storage
+    destination: object-storage
+    protocol: tcp
+    port: 18888
+    purpose: SeaweedFS filer gRPC between the storage components and the bucket job
+    scope: private
+    direction: source-to-destination
+  - id: object-storage-volume
+    source: object-storage
+    destination: object-storage
+    protocol: tcp
+    port: 8080
+    purpose: SeaweedFS volume server between the storage components
+    scope: private
+    direction: source-to-destination
+  - id: object-storage-volume-grpc
+    source: object-storage
+    destination: object-storage
+    protocol: tcp
+    port: 18080
+    purpose: SeaweedFS volume server gRPC between the storage components
+    scope: private
+    direction: source-to-destination
+  - id: application-otlp-grpc
+    source: cluster-workload
+    destination: collector
+    protocol: tcp
+    port: 4317
+    purpose: OTLP over gRPC pushed by applications to the cluster collector
+    scope: private
+    direction: source-to-destination
+  - id: application-otlp-http
+    source: cluster-workload
+    destination: collector
+    protocol: tcp
+    port: 4318
+    purpose: OTLP over HTTP pushed by applications to the cluster collector
+    scope: private
+    direction: source-to-destination
+  - id: application-profiles
+    source: cluster-workload
+    destination: collector
+    protocol: tcp
+    port: 4040
+    purpose: Profiles pushed by application SDKs to the cluster collector
+    scope: private
+    direction: source-to-destination

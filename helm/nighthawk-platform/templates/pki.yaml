@@ -1,0 +1,91 @@
+{{- if or .Values.enabled.foundation .Values.enabled.gatewayIdentity }}
+# Certificate requests for this namespace. The gateway has a namespace of its own, so this
+# is installed once beside the workloads and once beside the gateway.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.pki.issuerServiceAccount }}
+  labels: {{- include "nighthawk.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+# The certificate manager authenticates to Vault as the issuer's service account, so it may
+# request a token for that one account and nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: certificate-issuer-token
+  labels: {{- include "nighthawk.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    resourceNames: [{{ .Values.pki.issuerServiceAccount | quote }}]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: certificate-issuer-token
+  labels: {{- include "nighthawk.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: certificate-issuer-token
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.pki.certManagerServiceAccount }}
+    namespace: {{ .Values.pki.certManagerNamespace }}
+{{- range $kind, $role := dict "server" .Values.pki.serverRole "client" .Values.pki.clientRole }}
+---
+# Only a signing request reaches Vault; private keys are generated in the cluster.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: vault-{{ $kind }}
+  labels: {{- include "nighthawk.labels" $ | nindent 4 }}
+spec:
+  vault:
+    server: {{ $.Values.vault.address | quote }}
+    path: {{ printf "%s/sign/%s" $.Values.pki.mount $role | quote }}
+    {{- with $.Values.vault.caCertSecret }}
+    caBundleSecretRef:
+      name: {{ . | quote }}
+      key: ca.crt
+    {{- end }}
+    auth:
+      kubernetes:
+        mountPath: {{ printf "/v1/auth/%s" $.Values.vault.authMount | quote }}
+        role: {{ $.Values.pki.issuerRole | quote }}
+        serviceAccountRef:
+          name: {{ $.Values.pki.issuerServiceAccount | quote }}
+{{- end }}
+{{- range .Values.certificates }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .name }}
+  labels: {{- include "nighthawk.labels" $ | nindent 4 }}
+spec:
+  secretName: {{ .secretName }}
+  commonName: {{ .commonName | quote }}
+  duration: {{ .duration }}
+  renewBefore: {{ .renewBefore }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  usages:
+    - digital signature
+    - {{ ternary "server auth" "client auth" (eq .kind "server") }}
+  {{- with .dnsNames }}
+  dnsNames: {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .uris }}
+  uris: {{- toYaml . | nindent 4 }}
+  {{- end }}
+  issuerRef:
+    kind: Issuer
+    name: vault-{{ .kind }}
+{{- end }}
+{{- end }}

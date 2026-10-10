@@ -1,0 +1,26 @@
+# Everything is driven from the control machine through the cluster API. The releases, their
+# order, charts, versions, and values are the rendered kubernetes/releases.yaml; nothing here
+# names a release or a version.
+k8s_platform_rendered_dir: "{{ nighthawk_k8s_rendered_dir }}"
+k8s_platform_releases: "{{ lookup('ansible.builtin.file', k8s_platform_rendered_dir ~ '/releases.yaml') | from_yaml }}"
+k8s_platform_kubeconfig: "{{ nighthawk_kubeconfig }}"
+k8s_platform_helm: "{{ nighthawk_helm_binary | default('helm') }}"
+# The platform's own chart, in this repository.
+k8s_platform_chart_dir: "{{ playbook_dir }}/../../helm"
+# Where verified upstream charts are kept on the control machine.
+k8s_platform_chart_cache: "{{ nighthawk_chart_cache_dir | default(k8s_platform_rendered_dir ~ '/.charts') }}"
+# The platform's own image, by digest, as the cluster can pull it. Required; there is no default.
+k8s_platform_image: "{{ nighthawk_image | default('') }}"
+# The cluster shape the inventory declares. It must equal the rendered profile.
+k8s_platform_shape: "{{ k3s_cluster_shape }}"
+# Seconds to wait between network policies. A policy engine that applies its whole rule set
+# in one transaction can be given them one at a time.
+k8s_platform_policy_pause_seconds: 0
+# Resend every data source password to Grafana, as after a query credential was rotated.
+k8s_platform_update_grafana_secrets: false
+
+# Teardown (tasks_from: teardown). Volumes are kept unless a purge is confirmed by giving
+# the cluster's name.
+k8s_platform_cluster_name: "{{ nighthawk_cluster_name | default('') }}"
+k8s_platform_purge: false
+k8s_platform_purge_confirm: ""

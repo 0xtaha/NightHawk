@@ -1,0 +1,20 @@
+# The cluster API is not a pod, so a NetworkPolicy can only name it by address. The addresses
+# and port are read from the cluster instead of being assumed.
+- name: Read the cluster API's endpoints
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ k8s_platform_kubeconfig }}"
+    api_version: discovery.k8s.io/v1
+    kind: EndpointSlice
+    namespace: default
+    label_selectors:
+      - kubernetes.io/service-name=kubernetes
+  register: k8s_platform_api_slices
+
+- name: Take its addresses and port
+  ansible.builtin.set_fact:
+    k8s_platform_cluster_api:
+      addresses: >-
+        {{ k8s_platform_api_slices.resources | map(attribute='endpoints') | flatten
+           | map(attribute='addresses') | flatten | unique | sort }}
+      port: "{{ (k8s_platform_api_slices.resources | map(attribute='ports') | flatten | map(attribute='port') | first) | int }}"
+    k8s_platform_host_aliases: []

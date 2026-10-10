@@ -112,8 +112,16 @@ class BackendConfigurationTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigurationError, f"{backend} configuration was reviewed for {field}"):
                 render_backends(self.platform(), path)
 
-    def test_other_deployments_are_skipped_with_a_message(self) -> None:
+    def test_self_hosted_development_runs_the_same_monolithic_configuration(self) -> None:
+        docker = render_backends(self.platform())
         self.data["deployment"] = "self-hosted-k8s"
+        self.assertEqual(render_backends(self.platform()), docker)
+
+    def test_other_deployments_are_skipped_with_a_message(self) -> None:
+        # The distributed production configuration of self-hosted Kubernetes is not rendered here.
+        self.data["deployment"] = "self-hosted-k8s"
+        self.data["profile"] = "production"
+        self.data["vault"]["address"] = "https://vault.example.com:8200"
         self.assertIsNone(render_backends(self.platform()))
         output = io.StringIO()
         with redirect_stdout(output):

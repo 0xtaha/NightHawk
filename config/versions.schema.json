@@ -10,6 +10,9 @@
     "object_storage",
     "kubernetes_platform",
     "grafana_charts",
+    "helm_charts",
+    "kubernetes_scaling",
+    "kubernetes_images",
     "collectors",
     "container_images",
     "validation_tools",
@@ -81,7 +84,7 @@
     "kubernetes_platform": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["k3s", "cilium", "metallb", "longhorn", "traefik", "cert_manager", "strimzi", "eks", "ebs_csi_driver"],
+      "required": ["k3s", "cilium", "metallb", "longhorn", "traefik", "cert_manager", "strimzi", "vault_secrets_operator", "cloudnative_pg", "eks", "ebs_csi_driver"],
       "properties": {
         "k3s": { "$ref": "#/$defs/pin" },
         "cilium": { "$ref": "#/$defs/pin" },
@@ -89,6 +92,8 @@
         "longhorn": { "$ref": "#/$defs/pin" },
         "traefik": { "$ref": "#/$defs/pin" },
         "cert_manager": { "$ref": "#/$defs/pin" },
+        "vault_secrets_operator": { "$ref": "#/$defs/pin" },
+        "cloudnative_pg": { "$ref": "#/$defs/pin" },
         "eks": { "$ref": "#/$defs/pin" },
         "ebs_csi_driver": { "$ref": "#/$defs/pin" },
         "strimzi": {
@@ -102,6 +107,39 @@
             "kafka_version": { "$ref": "#/$defs/version" },
             "kafka_source": { "$ref": "#/$defs/source" }
           }
+        }
+      }
+    },
+    "helm_charts": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_]*$" },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["chart", "repository", "version", "sha256", "started"],
+        "properties": {
+          "chart": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+          "repository": { "type": "string", "pattern": "^https://[^\\s]+$" },
+          "version": { "type": "string", "minLength": 1 },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "version_of": { "type": "string", "pattern": "^[a-z_]+(\\.[a-z_]+)+$" },
+          "app_version": { "type": "string", "minLength": 1 },
+          "app_version_of": { "type": "string", "pattern": "^[a-z_]+(\\.[a-z_]+)+$" },
+          "started": { "type": "boolean" }
+        },
+        "dependentRequired": { "app_version": ["app_version_of"], "app_version_of": ["app_version"] }
+      }
+    },
+    "kubernetes_scaling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["horizontally_scalable"],
+      "properties": {
+        "horizontally_scalable": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" }
         }
       }
     },
@@ -153,23 +191,21 @@
         "python_base": { "$ref": "#/$defs/image" }
       }
     },
+    "kubernetes_images": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_]*$" },
+      "additionalProperties": { "$ref": "#/$defs/image" }
+    },
     "validation_tools": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["terraform", "aws_provider"],
+      "required": ["terraform", "helm", "kubectl", "kubeconform", "aws_provider"],
       "properties": {
-        "terraform": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["version", "sha256"],
-          "properties": {
-            "version": { "$ref": "#/$defs/version" },
-            "sha256": {
-              "type": "object",
-              "additionalProperties": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
-            }
-          }
-        },
+        "terraform": { "$ref": "#/$defs/checksummed_tool" },
+        "helm": { "$ref": "#/$defs/checksummed_tool" },
+        "kubectl": { "$ref": "#/$defs/checksummed_tool" },
+        "kubeconform": { "$ref": "#/$defs/checksummed_tool" },
         "aws_provider": {
           "type": "object",
           "additionalProperties": false,
@@ -211,12 +247,13 @@
     "automation_tools": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["ansible_core", "ansible_lint", "molecule", "molecule_plugins", "collections"],
+      "required": ["ansible_core", "ansible_lint", "molecule", "molecule_plugins", "kubernetes_client", "collections"],
       "properties": {
         "ansible_core": { "$ref": "#/$defs/pin" },
         "ansible_lint": { "$ref": "#/$defs/pin" },
         "molecule": { "$ref": "#/$defs/pin" },
         "molecule_plugins": { "$ref": "#/$defs/pin" },
+        "kubernetes_client": { "$ref": "#/$defs/pin" },
         "collections": {
           "type": "object",
           "minProperties": 1,
@@ -287,6 +324,19 @@
     }
   },
   "$defs": {
+    "checksummed_tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "sha256"],
+      "properties": {
+        "version": { "$ref": "#/$defs/version" },
+        "sha256": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }
+      }
+    },
     "checksummed": {
       "type": "object",
       "additionalProperties": false,

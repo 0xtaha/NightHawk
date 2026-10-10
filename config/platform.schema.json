@@ -26,6 +26,15 @@
             "server_role": {"$ref": "#/$defs/id"},
             "client_role": {"$ref": "#/$defs/id"}
           }
+        },
+        "kubernetes_auth": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mount"],
+          "properties": {
+            "mount": {"$ref": "#/$defs/vault_path"},
+            "cluster_address": {"type": "string", "pattern": "^https?://[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$"}
+          }
         }
       }
     },

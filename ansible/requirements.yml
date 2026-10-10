@@ -6,6 +6,9 @@ collections:
     version: "2.2.2"
   - name: community.general
     version: "13.5.0"
+  # Helm releases and cluster resources for the Kubernetes playbooks.
+  - name: kubernetes.core
+    version: "6.6.0"
   # Used only by the role tests, through Molecule's Podman driver.
   - name: containers.podman
     version: "1.21.1"

@@ -1,0 +1,91 @@
+{{- if .Values.enabled.foundation }}
+{{- range .Values.workloads }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .name }}
+  labels: {{- include "nighthawk.labels" $ | nindent 4 }}
+automountServiceAccountToken: {{ .apiAccess | default false }}
+{{- end }}
+---
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultConnection
+metadata:
+  name: vault
+  labels: {{- include "nighthawk.labels" . | nindent 4 }}
+spec:
+  address: {{ .Values.vault.address | quote }}
+  {{- with .Values.vault.caCertSecret }}
+  caCertSecretRef: {{ . | quote }}
+  {{- end }}
+{{- range $workload := .Values.workloads }}
+{{- if $workload.secrets }}
+---
+# No Vault credential is stored: the operator logs in as this workload's service account.
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultAuth
+metadata:
+  name: {{ $workload.name }}
+  labels: {{- include "nighthawk.labels" $ | nindent 4 }}
+spec:
+  vaultConnectionRef: vault
+  method: kubernetes
+  mount: {{ $.Values.vault.authMount | quote }}
+  kubernetes:
+    role: {{ $workload.role | quote }}
+    serviceAccount: {{ $workload.name | quote }}
+{{- range $secret := $workload.secrets }}
+---
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultStaticSecret
+metadata:
+  name: {{ $workload.name }}-{{ $secret.ref }}
+  labels: {{- include "nighthawk.labels" $ | nindent 4 }}
+spec:
+  vaultAuthRef: {{ $workload.name }}
+  mount: {{ $.Values.vault.kvMount | quote }}
+  type: kv-v2
+  path: {{ $secret.path | quote }}
+  refreshAfter: {{ $.Values.vault.refreshAfter | quote }}
+  {{- with $workload.restart }}
+  # These workloads do not read their files again by themselves.
+  rolloutRestartTargets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  destination:
+    name: {{ include "nighthawk.secretName" (dict "workload" $workload.name "ref" $secret.ref) }}
+    create: true
+    overwrite: true
+    {{- if eq ($secret.shape | default "") "storage-identity" }}
+    # Stored as one JSON value; backends read the two keys from their environment.
+    transformation:
+      templates:
+        NIGHTHAWK_S3_ACCESS_KEY:
+          text: {{ printf "{{- (get .Secrets %q | fromJson).access_key -}}" $secret.key | quote }}
+        NIGHTHAWK_S3_SECRET_KEY:
+          text: {{ printf "{{- (get .Secrets %q | fromJson).secret_key -}}" $secret.key | quote }}
+    {{- else if eq ($secret.shape | default "") "grafana-admin" }}
+    transformation:
+      templates:
+        admin-user:
+          text: admin
+        admin-password:
+          text: {{ printf "{{- get .Secrets %q -}}" $secret.key | quote }}
+    {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- range $group, $entries := .Values.files }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nighthawk-{{ $group }}
+  labels: {{- include "nighthawk.labels" $ | nindent 4 }}
+data:
+  {{- range $name, $content := $entries }}
+  {{ $name }}: {{ $content | quote }}
+  {{- end }}
+{{- end }}
+{{- end }}

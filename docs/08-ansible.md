@@ -462,11 +462,16 @@ It leaves them only if `k3s_fetch_kubeconfig_to` is set; then it is written
 on the control machine with owner-only permissions, addressed to the first
 server.
 
-### What phase 6 installs next
+### What comes next
 
-MetalLB (using the address pool checked here), Longhorn (using the disks
-and packages checked here), Traefik, cert-manager, and the platform's
-workloads.
+[09-kubernetes.md](09-kubernetes.md): `k8s-addons.yml` installs MetalLB
+(using the address pool checked here), cert-manager, and the Vault Secrets
+Operator, and `k8s-platform.yml` deploys the platform. Only the development
+profile is implemented; Longhorn and the production profile are not.
+
+The `cilium` role sets `policyCIDRMatchMode: nodes`, which the platform's
+NetworkPolicies need to reach the cluster API and the kubelets. Like the
+rest of the cluster bootstrap, that has not run on a real cluster.
 
 ## External collectors
 

@@ -46,6 +46,9 @@ class FakeVault:
         self.kv: dict[str, list[dict[str, str]]] = {}
         self.roles: dict[str, dict] = {}
         self.policies: dict[str, str] = {}
+        self.auth_mounts: dict[str, dict] = {}
+        self.auth_roles: dict[tuple[str, str], dict] = {}
+        self.auth_configs: dict[str, dict] = {}
         self.revoked: list[str] = []
         self.denied: set[str] = set()
         self.conflict_next_write = False
@@ -131,6 +134,27 @@ class FakeVault:
             return 200, {"data": {f"{name}/": value for name, value in self.mounts.items()}}
         if path.startswith("sys/mounts/"):
             self.mounts[path.removeprefix("sys/mounts/")] = {"type": payload["type"], "options": payload.get("options") or {}}
+            return 204, None
+        if path == "sys/auth" and method == "GET":
+            return 200, {"data": {f"{name}/": value for name, value in self.auth_mounts.items()}}
+        if path.startswith("sys/auth/"):
+            self.auth_mounts[path.removeprefix("sys/auth/")] = {"type": payload["type"]}
+            return 204, None
+        if path.startswith("auth/") and "/role/" in path:
+            mount, _, name = path.removeprefix("auth/").partition("/role/")
+            if mount not in self.auth_mounts:
+                return 404, {"errors": ["no handler for route"]}
+            if method == "GET":
+                role = self.auth_roles.get((mount, name))
+                return (200, {"data": role}) if role else (404, {"errors": []})
+            self.auth_roles[(mount, name)] = dict(payload)
+            return 204, None
+        if path.startswith("auth/") and path.endswith("/config"):
+            mount = path.removeprefix("auth/").removesuffix("/config")
+            if method == "GET":
+                config = self.auth_configs.get(mount)
+                return (200, {"data": config}) if config else (404, {"errors": []})
+            self.auth_configs[mount] = dict(payload)
             return 204, None
         if path.startswith("sys/policies/acl/"):
             name = path.removeprefix("sys/policies/acl/")

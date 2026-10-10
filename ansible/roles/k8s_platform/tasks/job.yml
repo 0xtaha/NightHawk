@@ -1,0 +1,55 @@
+# A job is run again on every deployment. It reports what it changed; a job that changed
+# nothing prints `no changes`.
+- name: "Render {{ k8s_platform_release.name }}"
+  kubernetes.core.helm_template:
+    binary_path: "{{ k8s_platform_helm }}"
+    chart_ref: "{{ k8s_platform_chart_ref }}"
+    release_name: "{{ k8s_platform_release.name }}"
+    release_namespace: "{{ k8s_platform_release.namespace }}"
+    values_files: "{{ k8s_platform_release['values'] | map('regex_replace', '^', k8s_platform_rendered_dir ~ '/values/') | list }}"
+    release_values: "{{ k8s_platform_set_values }}"
+  register: k8s_platform_rendered_job
+  check_mode: false
+  changed_when: false
+
+- name: "Remove the previous run of {{ k8s_platform_release.name }}"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ k8s_platform_kubeconfig }}"
+    api_version: batch/v1
+    kind: Job
+    namespace: "{{ k8s_platform_release.namespace }}"
+    name: "{{ k8s_platform_release.job }}"
+    state: absent
+    wait: true
+    delete_options:
+      propagationPolicy: Foreground
+  changed_when: false
+
+- name: "Start the job and wait for it to finish: {{ k8s_platform_release.name }}"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ k8s_platform_kubeconfig }}"
+    namespace: "{{ k8s_platform_release.namespace }}"
+    definition: "{{ k8s_platform_rendered_job.stdout | from_yaml_all | select | list }}"
+    state: present
+    wait: true
+    wait_condition:
+      type: Complete
+      status: "True"
+    wait_timeout: "{{ k8s_platform_release.wait_seconds }}"
+  changed_when: false
+
+- name: "Read what the job reported: {{ k8s_platform_release.name }}"
+  kubernetes.core.k8s_log:
+    kubeconfig: "{{ k8s_platform_kubeconfig }}"
+    api_version: batch/v1
+    kind: Job
+    namespace: "{{ k8s_platform_release.namespace }}"
+    name: "{{ k8s_platform_release.job }}"
+  register: k8s_platform_job_log
+  when: not ansible_check_mode
+
+- name: "Report what the job changed: {{ k8s_platform_release.name }}"
+  ansible.builtin.debug:
+    msg: "{{ k8s_platform_job_log.log_lines | default([]) }}"
+  changed_when: (k8s_platform_job_log.log_lines | default(['no changes']) | select | last) != 'no changes'
+  when: not ansible_check_mode

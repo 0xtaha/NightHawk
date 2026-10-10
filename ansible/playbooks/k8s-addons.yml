@@ -1,0 +1,9 @@
+# Install the cluster add-ons the platform needs. See docs/09-kubernetes.md.
+# Everything runs on the control machine against the cluster API.
+- name: Install the cluster add-ons
+  hosts: k3s_servers[0]
+  connection: local
+  gather_facts: false
+  become: false
+  roles:
+    - role: k8s_addons

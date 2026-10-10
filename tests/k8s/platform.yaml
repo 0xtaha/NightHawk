@@ -1,0 +1,298 @@
+# Acceptance document for the local cluster: two customers with two datastreams each, as in
+# tests/e2e/platform.yaml, deployed as the development profile of self-hosted Kubernetes.
+# The Vault is the dev-mode fixture in tests/k8s/vault-dev.yaml: the command-line tool reaches
+# it through a forwarded loopback port, the cluster through its service address.
+# Retention values are test values, not production defaults.
+schema_version: 2
+deployment: self-hosted-k8s
+profile: development
+vault:
+  address: http://127.0.0.1:8220
+  kv_mount: nighthawk-kv
+  pki:
+    mount: nighthawk-pki
+    server_role: nighthawk-server
+    client_role: nighthawk-collector
+  kubernetes_auth:
+    mount: nighthawk-k8s
+    cluster_address: http://vault.vault-dev.svc:8200
+gateway:
+  hostname: gateway.nighthawk.internal
+  entry_points:
+  - cluster-gateway
+  - grafana-gateway
+  - remote-gateway
+  grafana_entry_point: grafana-gateway
+  auth_service: http://authz.nighthawk.svc:9180
+  upstreams:
+    grafana: http://grafana.nighthawk.svc:3000
+    metrics: http://mimir.nighthawk.svc:8080
+    logs: http://loki.nighthawk.svc:3100
+    traces:
+      query: http://tempo.nighthawk.svc:3200
+      otlp_grpc: h2c://tempo.nighthawk.svc:4317
+      otlp_http: http://tempo.nighthawk.svc:4318
+    profiles: http://pyroscope.nighthawk.svc:4040
+  revoked_certificate_fingerprints: []
+grafana:
+  hostname: grafana.nighthawk.internal
+  admin_secret_ref: grafana-admin
+storage:
+  provider: seaweedfs
+  bindings:
+    mimir-blocks:
+      protocol: s3
+      endpoint: https://seaweedfs:8333
+      region: local
+      bucket: nighthawk-mimir-blocks
+      force_path_style: true
+      tls: &id001
+        enabled: true
+        trust: pki
+        ca_secret_ref: null
+      identity: &id002
+        type: secret
+        ref: mimir-storage
+      capabilities: &id003
+        versioning: false
+        lifecycle: false
+        workload_identity: false
+    mimir-ruler:
+      protocol: s3
+      endpoint: https://seaweedfs:8333
+      region: local
+      bucket: nighthawk-mimir-ruler
+      force_path_style: true
+      tls: *id001
+      identity: *id002
+      capabilities: *id003
+    mimir-alertmanager:
+      protocol: s3
+      endpoint: https://seaweedfs:8333
+      region: local
+      bucket: nighthawk-mimir-alertmanager
+      force_path_style: true
+      tls: *id001
+      identity: *id002
+      capabilities: *id003
+    loki-chunks:
+      protocol: s3
+      endpoint: https://seaweedfs:8333
+      region: local
+      bucket: nighthawk-loki-chunks
+      force_path_style: true
+      tls: *id001
+      identity:
+        type: secret
+        ref: loki-storage
+      capabilities: *id003
+    tempo-traces:
+      protocol: s3
+      endpoint: https://seaweedfs:8333
+      region: local
+      bucket: nighthawk-tempo-traces
+      force_path_style: true
+      tls: *id001
+      identity:
+        type: secret
+        ref: tempo-storage
+      capabilities: *id003
+    pyroscope-profiles:
+      protocol: s3
+      endpoint: https://seaweedfs:8333
+      region: local
+      bucket: nighthawk-pyroscope-profiles
+      force_path_style: true
+      tls: *id001
+      identity:
+        type: secret
+        ref: pyroscope-storage
+      capabilities: *id003
+secrets:
+  mimir-storage:
+    path: nighthawk/k8s-e2e/mimir-storage
+    key: value
+  loki-storage:
+    path: nighthawk/k8s-e2e/loki-storage
+    key: value
+  tempo-storage:
+    path: nighthawk/k8s-e2e/tempo-storage
+    key: value
+  pyroscope-storage:
+    path: nighthawk/k8s-e2e/pyroscope-storage
+    key: value
+  grafana-admin:
+    path: nighthawk/k8s-e2e/grafana-admin
+    key: value
+  acme-web-ingest:
+    path: nighthawk/k8s-e2e/acme-web-ingest
+    key: value
+  acme-web-query:
+    path: nighthawk/k8s-e2e/acme-web-query
+    key: value
+  acme-batch-ingest:
+    path: nighthawk/k8s-e2e/acme-batch-ingest
+    key: value
+  acme-batch-query:
+    path: nighthawk/k8s-e2e/acme-batch-query
+    key: value
+  globex-web-ingest:
+    path: nighthawk/k8s-e2e/globex-web-ingest
+    key: value
+  globex-web-query:
+    path: nighthawk/k8s-e2e/globex-web-query
+    key: value
+  globex-edge-ingest:
+    path: nighthawk/k8s-e2e/globex-edge-ingest
+    key: value
+  globex-edge-query:
+    path: nighthawk/k8s-e2e/globex-edge-query
+    key: value
+credentials:
+- id: acme-web-ingest
+  secret_ref: acme-web-ingest
+  tenant: acme
+  datastream: web
+  permission: ingest
+- id: acme-web-query
+  secret_ref: acme-web-query
+  tenant: acme
+  datastream: web
+  permission: query
+- id: acme-batch-ingest
+  secret_ref: acme-batch-ingest
+  tenant: acme
+  datastream: batch
+  permission: ingest
+- id: acme-batch-query
+  secret_ref: acme-batch-query
+  tenant: acme
+  datastream: batch
+  permission: query
+- id: globex-web-ingest
+  secret_ref: globex-web-ingest
+  tenant: globex
+  datastream: web
+  permission: ingest
+- id: globex-web-query
+  secret_ref: globex-web-query
+  tenant: globex
+  datastream: web
+  permission: query
+- id: globex-edge-ingest
+  secret_ref: globex-edge-ingest
+  tenant: globex
+  datastream: edge
+  permission: ingest
+  certificate_identity: spiffe://nighthawk/globex/edge/collector
+- id: globex-edge-query
+  secret_ref: globex-edge-query
+  tenant: globex
+  datastream: edge
+  permission: query
+tenants:
+- id: acme
+  datastreams:
+  - id: web
+    backend_id: acme-web
+    signals:
+      metrics:
+        retention: 168h
+        ingestion_rate_samples_per_second: 10000
+        query_concurrency: 4
+      logs:
+        retention: 240h
+        ingestion_rate_bytes_per_second: 1048576
+        query_concurrency: 4
+      traces:
+        retention: 120h
+        ingestion_rate_bytes_per_second: 1048576
+        query_concurrency: 4
+      profiles:
+        retention: 72h
+        ingestion_rate_bytes_per_second: 1048576
+        query_concurrency: 4
+    collection:
+      approved: true
+      drop_fields:
+      - password
+      - authorization
+      - cookie
+      - email
+      - user.email
+      allow_privileged_profiling: false
+  - id: batch
+    backend_id: acme-batch
+    signals:
+      metrics:
+        retention: 72h
+        ingestion_rate_samples_per_second: 10000
+        query_concurrency: 4
+      logs:
+        retention: 72h
+        ingestion_rate_bytes_per_second: 1048576
+        query_concurrency: 4
+    collection:
+      approved: true
+      drop_fields:
+      - password
+      - authorization
+      - cookie
+      - email
+      allow_privileged_profiling: false
+- id: globex
+  datastreams:
+  - id: web
+    backend_id: globex-web
+    signals:
+      metrics:
+        retention: 96h
+        ingestion_rate_samples_per_second: 10000
+        query_concurrency: 4
+      logs:
+        retention: 96h
+        ingestion_rate_bytes_per_second: 1048576
+        query_concurrency: 4
+      traces:
+        retention: 96h
+        ingestion_rate_bytes_per_second: 1048576
+        query_concurrency: 4
+      profiles:
+        retention: 96h
+        ingestion_rate_bytes_per_second: 1048576
+        query_concurrency: 4
+    collection:
+      approved: true
+      drop_fields:
+      - password
+      - authorization
+      - cookie
+      - email
+      allow_privileged_profiling: false
+  - id: edge
+    backend_id: globex-edge
+    signals:
+      metrics:
+        retention: 48h
+        ingestion_rate_samples_per_second: 10000
+        query_concurrency: 4
+      logs:
+        retention: 48h
+        ingestion_rate_bytes_per_second: 1048576
+        query_concurrency: 4
+      traces:
+        retention: 48h
+        ingestion_rate_bytes_per_second: 1048576
+        query_concurrency: 4
+      profiles:
+        retention: 48h
+        ingestion_rate_bytes_per_second: 1048576
+        query_concurrency: 4
+    collection:
+      approved: true
+      drop_fields:
+      - password
+      - authorization
+      - cookie
+      - email
+      allow_privileged_profiling: false

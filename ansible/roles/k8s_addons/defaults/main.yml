@@ -1,0 +1,6 @@
+# The add-ons, their order, charts, and versions are the rendered kubernetes/releases.yaml.
+# Addresses the load balancer hands out: the pool the cluster layout check accepted.
+k8s_addons_load_balancer_pool: "{{ k3s_load_balancer_pool }}"
+k8s_addons_load_balancer_namespace: metallb-system
+# Whole block devices on storage nodes, as the cluster layout check accepted them.
+k8s_addons_storage_disks: "{{ k3s_storage_disks | default([]) }}"

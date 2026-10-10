@@ -291,12 +291,130 @@ def policy_hcl(platform: Platform) -> str:
     return "\n".join(lines) + "\n"
 
 
-def access_requirements(platform: Platform) -> dict[str, str]:
-    """Non-secret, deterministic files an operator applies to their own Vault."""
+def _hcl(paths: dict[str, list[str]], title: str) -> str:
+    lines = [f"# {title} Rendered from the platform document; do not edit."]
+    for path, capabilities in sorted(paths.items()):
+        lines += ["", f'path "{path}" {{', f"  capabilities = {json.dumps(capabilities)}", "}"]
+    return "\n".join(lines) + "\n"
+
+
+# How long a cluster identity's Vault token lives before the operator logs in again.
+CLUSTER_TOKEN_TTL = "1h"
+
+
+def cluster_access(
+    platform: Platform, workloads: list, namespace: str, issuer: str, issuer_namespaces: tuple[str, ...] = (),
+) -> dict:
+    """What Vault must allow so a cluster can read its workloads' secrets and have certificates signed.
+
+    One role and one policy per workload identity. A workload's policy reads exactly the paths
+    of the secrets it uses; the issuer's policy signs with the two PKI roles. Nothing can write
+    a secret, and nothing here is a secret.
+    """
+    vault = platform.vault
+    if vault.kubernetes_auth_mount is None:
+        raise ConfigurationError("vault: kubernetes_auth.mount is not declared")
+    policies = {
+        workload.vault_role: _hcl(
+            {f"{vault.kv_mount}/data/{platform.secrets[ref].path}": ["read"] for ref in workload.secrets},
+            f"Read-only access for the {workload.name} workload.",
+        )
+        for workload in workloads if workload.secrets
+    }
+    issuer_role = f"nighthawk-{issuer}"
+    policies[issuer_role] = _hcl(
+        {f"{vault.pki_mount}/sign/{role}": ["create", "update"] for role in (vault.server_role, vault.client_role)},
+        "Certificate signing for the cluster's certificate manager.",
+    )
+    accounts = {workload.vault_role: workload.service_account for workload in workloads if workload.secrets}
+    accounts[issuer_role] = issuer
     return {
+        "mount": vault.kubernetes_auth_mount,
+        "policies": policies,
+        "roles": {
+            role: {
+                "bound_service_account_names": [account],
+                "bound_service_account_namespaces": (
+                    sorted({namespace, *issuer_namespaces}) if role == issuer_role else [namespace]
+                ),
+                "token_policies": [role],
+                "token_ttl": CLUSTER_TOKEN_TTL,
+                "token_max_ttl": CLUSTER_TOKEN_TTL,
+            }
+            for role, account in sorted(accounts.items())
+        },
+    }
+
+
+def access_requirements(platform: Platform, cluster: dict | None = None) -> dict[str, str]:
+    """Non-secret, deterministic files an operator applies to their own Vault."""
+    files = {
         "vault/policy.hcl": policy_hcl(platform),
         "vault/pki-roles.json": json.dumps(pki_roles(platform), indent=2, sort_keys=True) + "\n",
     }
+    if cluster is not None:
+        files["vault/kubernetes-auth.json"] = json.dumps(cluster, indent=2, sort_keys=True) + "\n"
+    return files
+
+
+def _role_matches(existing: dict, wanted: dict) -> bool:
+    return (
+        sorted(existing.get("bound_service_account_names") or []) == wanted["bound_service_account_names"]
+        and sorted(existing.get("bound_service_account_namespaces") or []) == wanted["bound_service_account_namespaces"]
+        and sorted(existing.get("token_policies") or []) == wanted["token_policies"]
+    )
+
+
+def cluster_access_problems(client: Client, cluster: dict) -> list[str]:
+    """Where a Vault differs from the rendered cluster requirements: missing, or allowing something else."""
+    mount, problems = cluster["mount"], []
+    auth = (client.call("GET", "sys/auth", operation="list authentication mounts").get("data") or {}).get(f"{mount}/")
+    if auth is None:
+        return [f"authentication mount {mount} does not exist; enable Kubernetes authentication there"]
+    if auth.get("type") != "kubernetes":
+        return [f"authentication mount {mount} is a {auth.get('type')} mount, not kubernetes"]
+    for name, hcl in sorted(cluster["policies"].items()):
+        current = client.call("GET", f"sys/policies/acl/{name}", operation="read policy", missing_ok=True)
+        if not current or "data" not in current:
+            problems.append(f"policy {name} does not exist; apply the rendered vault/kubernetes-auth.json")
+        elif (current.get("data") or {}).get("policy") != hcl:
+            problems.append(f"policy {name} differs from the rendered one; it may allow more than its workload needs")
+    for name, wanted in sorted(cluster["roles"].items()):
+        current = client.call("GET", f"auth/{mount}/role/{name}", operation="read role", missing_ok=True)
+        if not current or "data" not in current:
+            problems.append(f"role {name} does not exist at {mount}; the cluster cannot authenticate as it")
+        elif not _role_matches(current.get("data") or {}, wanted):
+            problems.append(f"role {name} is bound to other service accounts or policies than the rendered ones")
+    return problems
+
+
+def apply_cluster_access(client: Client, cluster: dict, kubernetes_host: str | None = None) -> list[str]:
+    """Development only: make a disposable Vault match the rendered cluster requirements."""
+    mount, created = cluster["mount"], []
+    auths = client.call("GET", "sys/auth", operation="list authentication mounts").get("data") or {}
+    existing = auths.get(f"{mount}/")
+    if existing is None:
+        client.call("POST", f"sys/auth/{mount}", {"type": "kubernetes"}, operation="enable authentication mount")
+        created.append(f"authentication mount {mount}")
+    elif existing.get("type") != "kubernetes":
+        raise VaultError(f"{mount} already exists in Vault as a {existing.get('type')} authentication mount")
+    if kubernetes_host is not None:
+        # Vault validates service account tokens by asking this API server.
+        current = client.call("GET", f"auth/{mount}/config", operation="read authentication configuration", missing_ok=True)
+        if not current or (current.get("data") or {}).get("kubernetes_host") != kubernetes_host:
+            client.call("POST", f"auth/{mount}/config", {"kubernetes_host": kubernetes_host}, operation="configure authentication")
+            created.append(f"authentication configuration {mount}")
+    for name, hcl in sorted(cluster["policies"].items()):
+        current = client.call("GET", f"sys/policies/acl/{name}", operation="read policy", missing_ok=True)
+        if not current or (current.get("data") or {}).get("policy") != hcl:
+            client.call("PUT", f"sys/policies/acl/{name}", {"policy": hcl}, operation="write policy")
+            created.append(f"policy {name}")
+    for name, wanted in sorted(cluster["roles"].items()):
+        current = client.call("GET", f"auth/{mount}/role/{name}", operation="read role", missing_ok=True)
+        if not current or "data" not in current or not _role_matches(current["data"] or {}, wanted):
+            client.call("POST", f"auth/{mount}/role/{name}", wanted, operation="write role")
+            created.append(f"role {name}")
+    return created
 
 
 def bootstrap_dev(

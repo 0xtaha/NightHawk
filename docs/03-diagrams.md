@@ -132,6 +132,11 @@ flowchart TB
 - Blue nodes identify implemented configuration/module code, not deployed
   infrastructure. Dotted arrows show hosting, provisioning, or configuration
   relationships; solid arrows show application or storage paths.
+- On Kubernetes only the single-node development profile of the self-hosted
+  deployment is implemented; it was installed on a local test cluster, not
+  on the k3s cluster the Ansible roles build. Kafka, the shared PostgreSQL,
+  MetalLB with Longhorn on real nodes, and everything under AWS are shown
+  here as the target, not as built. See [09-kubernetes.md](09-kubernetes.md).
 - The Ansible roles are implemented and tested in containers of each
   supported operating system. None has run on a real host; starting k3s,
   Cilium, firewall enforcement, and a remote deployment end to end are not

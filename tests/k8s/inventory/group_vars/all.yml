@@ -1,0 +1,14 @@
+# Paths come from the acceptance suite's environment, so nothing here is machine-specific.
+nighthawk_kubeconfig: "{{ lookup('ansible.builtin.env', 'KUBECONFIG') }}"
+nighthawk_k8s_rendered_dir: "{{ lookup('ansible.builtin.env', 'NIGHTHAWK_K8S_RENDERED_DIR') }}"
+nighthawk_helm_binary: "{{ lookup('ansible.builtin.env', 'NIGHTHAWK_HELM') }}"
+nighthawk_image: "{{ lookup('ansible.builtin.env', 'NIGHTHAWK_IMAGE') }}"
+nighthawk_cluster_name: nighthawk-e2e
+
+k3s_cluster_shape: development
+# Inside the test cluster's own network, clear of the node's address.
+k3s_load_balancer_pool:
+  - 192.168.49.240-192.168.49.250
+# The test cluster's policy engine programs its whole rule set in one transaction of limited
+# size, so it is given the policies one at a time.
+k8s_platform_policy_pause_seconds: 8

@@ -148,7 +148,9 @@ class RenderCollectorTests(unittest.TestCase):
             self.assertNotIn("tenant_id", text)
             self.assertEqual(re.findall(r'\bpassword\s*=\s*(\S+)', text), ["local.file.gateway_credential.content"])
             self.assertEqual(text.count('password_file = sys.env("NIGHTHAWK_CREDENTIAL_FILE")'), 3)
-            self.assertIn('filename  = sys.env("NIGHTHAWK_CREDENTIAL_FILE")', text)
+            self.assertRegex(text, r'filename\s+= sys\.env\("NIGHTHAWK_CREDENTIAL_FILE"\)')
+            # Polled, so the collector starts on a host that has no inotify instance left.
+            self.assertRegex(text, r'detector\s+= "poll"')
             self.assertIn('username      = "example-ingest"', text)
             self.assertIn("https://gateway.nighthawk.internal:8443", text)
 

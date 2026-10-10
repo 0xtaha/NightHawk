@@ -302,8 +302,12 @@ otelcol.processor.transform "redact" {{
 // arguments work. The secret comes from local.file, which also picks up a rotated file;
 // the file must hold the secret without a trailing newline.
 local.file "gateway_credential" {{
-  filename  = {CREDENTIAL_FILE}
-  is_secret = true
+  filename       = {CREDENTIAL_FILE}
+  is_secret      = true
+  // Polled rather than watched: a host with few inotify instances left cannot create a
+  // watcher, and the collector would not start. A rotated credential is read within the period.
+  detector       = "poll"
+  poll_frequency = "30s"
 }}
 
 otelcol.auth.basic "gateway" {{

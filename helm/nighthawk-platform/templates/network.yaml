@@ -1,0 +1,60 @@
+{{- if .Values.enabled.network }}
+# Nothing in this namespace may receive or open a connection unless a policy below allows it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  labels: {{- include "nighthawk.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+{{- range $policy := .Values.networkPolicies }}
+{{- if eq $policy.namespace $.Release.Namespace }}
+---
+# Each entry is one rule of the network contract, named in the annotation below.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-{{ $policy.component }}
+  labels: {{- include "nighthawk.labels" $ | nindent 4 }}
+  annotations:
+    nighthawk.io/contract-rules: {{ $policy.rules | join "," | quote }}
+spec:
+  podSelector:
+    matchLabels: {{- include "nighthawk.component" $policy.component | nindent 6 }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    {{- range $policy.ingress }}
+    - ports:
+        {{- range .ports }}
+        - {port: {{ .port }}, protocol: {{ .protocol }}}
+        {{- end }}
+      {{- include "nighthawk.peer" (dict "peer" .peer "direction" "from" "root" $) | nindent 6 }}
+    {{- else }}
+    []
+    {{- end }}
+  egress:
+    {{- range $policy.egress }}
+    {{- if eq .peer.kind "cluster-api" }}
+    # The cluster API is not a pod; the deployment supplies its real addresses and port.
+    - ports:
+        - {port: {{ $.Values.clusterApi.port }}, protocol: TCP}
+      to:
+        {{- range $.Values.clusterApi.addresses }}
+        - ipBlock: {cidr: {{ printf "%s/32" . | quote }}}
+        {{- else }}
+        []
+        {{- end }}
+    {{- else }}
+    - ports:
+        {{- range .ports }}
+        - {port: {{ .port }}, protocol: {{ .protocol }}}
+        {{- end }}
+      {{- include "nighthawk.peer" (dict "peer" .peer "direction" "to" "root" $) | nindent 6 }}
+    {{- end }}
+    {{- else }}
+    []
+    {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

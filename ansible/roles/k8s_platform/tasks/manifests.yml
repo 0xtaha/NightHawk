@@ -1,0 +1,54 @@
+- name: "Render {{ k8s_platform_release.name }}"
+  kubernetes.core.helm_template:
+    binary_path: "{{ k8s_platform_helm }}"
+    chart_ref: "{{ k8s_platform_chart_ref }}"
+    release_name: "{{ k8s_platform_release.name }}"
+    release_namespace: "{{ k8s_platform_release.namespace }}"
+    values_files: "{{ k8s_platform_release['values'] | map('regex_replace', '^', k8s_platform_rendered_dir ~ '/values/') | list }}"
+    release_values: "{{ k8s_platform_set_values }}"
+  register: k8s_platform_rendered_manifests
+  check_mode: false
+  changed_when: false
+
+- name: "Create the namespace of {{ k8s_platform_release.name }}"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ k8s_platform_kubeconfig }}"
+    api_version: v1
+    kind: Namespace
+    name: "{{ k8s_platform_release.namespace }}"
+    state: present
+
+- name: "Apply each resource of {{ k8s_platform_release.name }}"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ k8s_platform_kubeconfig }}"
+    namespace: "{{ k8s_platform_release.namespace }}"
+    definition: "{{ item }}"
+    apply: true
+    state: present
+  loop: "{{ k8s_platform_rendered_manifests.stdout | from_yaml_all | select | list }}"
+  loop_control:
+    label: "{{ item.kind }}/{{ item.metadata.name }}"
+    pause: "{{ k8s_platform_policy_pause_seconds }}"
+  register: k8s_platform_applied
+
+- name: "List the policies in the namespace of {{ k8s_platform_release.name }}"
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ k8s_platform_kubeconfig }}"
+    api_version: networking.k8s.io/v1
+    kind: NetworkPolicy
+    namespace: "{{ k8s_platform_release.namespace }}"
+    label_selectors:
+      - app.kubernetes.io/part-of=nighthawk
+  register: k8s_platform_existing
+
+- name: "Remove policies that are no longer rendered: {{ k8s_platform_release.name }}"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ k8s_platform_kubeconfig }}"
+    api_version: networking.k8s.io/v1
+    kind: NetworkPolicy
+    namespace: "{{ k8s_platform_release.namespace }}"
+    name: "{{ item }}"
+    state: absent
+  loop: >-
+    {{ k8s_platform_existing.resources | map(attribute='metadata.name')
+       | difference(k8s_platform_rendered_manifests.stdout | from_yaml_all | select | map(attribute='metadata.name')) | list }}

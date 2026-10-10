@@ -1,6 +1,6 @@
 # Contract example for the self-hosted Kubernetes profile, not deployment configuration.
-# Retention values are examples. The workloads this document configures are installed in phase 6;
-# phase 5 uses it for the cluster join token and the rendered Ansible inputs.
+# Retention values are examples. See docs/08-ansible.md for the cluster and docs/09-kubernetes.md
+# for the workloads. `profile: production` selects the distributed, replicated deployment.
 schema_version: 2
 deployment: self-hosted-k8s
 profile: production
@@ -12,20 +12,25 @@ vault:
     mount: nighthawk-pki
     server_role: nighthawk-server
     client_role: nighthawk-collector
+  # Where the cluster's service accounts authenticate. Workloads read their secrets through it,
+  # read-only; no Vault credential is stored in the cluster.
+  kubernetes_auth:
+    mount: nighthawk-k8s
 gateway:
   hostname: gateway.nighthawk.internal
-  entry_points: [local-gateway, grafana-gateway]
+  # In-cluster collectors, Grafana, and collectors outside the cluster with a client certificate.
+  entry_points: [cluster-gateway, grafana-gateway, remote-gateway]
   grafana_entry_point: grafana-gateway
-  auth_service: http://authz:9180
+  auth_service: http://authz.nighthawk.svc:9180
   upstreams:
-    grafana: http://grafana:3000
-    metrics: http://mimir:8080
-    logs: http://loki:3100
+    grafana: http://grafana.nighthawk.svc:3000
+    metrics: http://mimir.nighthawk.svc:8080
+    logs: http://loki.nighthawk.svc:3100
     traces:
-      query: http://tempo:3200
-      otlp_grpc: h2c://tempo:4317
-      otlp_http: http://tempo:4318
-    profiles: http://pyroscope:4040
+      query: http://tempo.nighthawk.svc:3200
+      otlp_grpc: h2c://tempo.nighthawk.svc:4317
+      otlp_http: http://tempo.nighthawk.svc:4318
+    profiles: http://pyroscope.nighthawk.svc:4040
   revoked_certificate_fingerprints: []
 grafana:
   hostname: grafana.nighthawk.internal
@@ -77,15 +82,17 @@ storage:
 cluster:
   # Generated once by `generate-cluster-token`; copied to nodes as a file by the k3s_node role.
   join_token_secret_ref: cluster-join-token
+# A workload's Vault policy covers a whole path, so secrets read by different workloads have
+# different paths. One path per secret is the simplest layout that satisfies that.
 secrets:
   cluster-join-token: {path: nighthawk/cluster, key: join-token}
-  mimir-storage: {path: nighthawk/self-hosted, key: mimir-storage}
-  loki-storage: {path: nighthawk/self-hosted, key: loki-storage}
-  tempo-storage: {path: nighthawk/self-hosted, key: tempo-storage}
-  pyroscope-storage: {path: nighthawk/self-hosted, key: pyroscope-storage}
-  grafana-admin: {path: nighthawk/self-hosted, key: grafana-admin}
-  example-ingest: {path: nighthawk/self-hosted, key: example-ingest}
-  example-query: {path: nighthawk/self-hosted, key: example-query}
+  mimir-storage: {path: nighthawk/self-hosted/mimir-storage, key: value}
+  loki-storage: {path: nighthawk/self-hosted/loki-storage, key: value}
+  tempo-storage: {path: nighthawk/self-hosted/tempo-storage, key: value}
+  pyroscope-storage: {path: nighthawk/self-hosted/pyroscope-storage, key: value}
+  grafana-admin: {path: nighthawk/self-hosted/grafana-admin, key: value}
+  example-ingest: {path: nighthawk/self-hosted/example-ingest, key: value}
+  example-query: {path: nighthawk/self-hosted/example-query, key: value}
 credentials:
   - id: example-ingest
     secret_ref: example-ingest

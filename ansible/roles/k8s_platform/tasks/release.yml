@@ -1,0 +1,150 @@
+- name: "Resolve the chart of {{ k8s_platform_release.name }}"
+  ansible.builtin.include_tasks: chart.yml
+  vars:
+    k8s_platform_chart_key: "{{ k8s_platform_release.chart }}"
+    k8s_platform_chart: "{{ k8s_platform_releases.charts[k8s_platform_release.chart] }}"
+  when: k8s_platform_release.chart != k8s_platform_releases.platform_chart
+
+- name: "Use the platform's own chart for {{ k8s_platform_release.name }}"
+  ansible.builtin.set_fact:
+    k8s_platform_chart_ref: "{{ k8s_platform_chart_dir }}/{{ k8s_platform_releases.platform_chart }}"
+  when: k8s_platform_release.chart == k8s_platform_releases.platform_chart
+
+- name: "Collect what only the cluster knows for {{ k8s_platform_release.name }}"
+  ansible.builtin.set_fact:
+    k8s_platform_set_values: >-
+      {{ ({'images': {'platform': k8s_platform_image}}
+          if k8s_platform_release.chart == k8s_platform_releases.platform_chart else {})
+         | combine({'hostAliases': k8s_platform_host_aliases} if k8s_platform_release.host_aliases | default(false) else {})
+         | combine({'clusterApi': k8s_platform_cluster_api} if k8s_platform_release.cluster_api | default(false) else {})
+         | combine({'grafana': {'provisionArguments': ['--update-secrets']}}
+                   if (k8s_platform_release.kind == 'job' and k8s_platform_update_grafana_secrets | bool) else {},
+                   recursive=true) }}
+
+- name: "Merge the rendered values with them for {{ k8s_platform_release.name }}"
+  ansible.builtin.set_fact:
+    k8s_platform_merged_values: >-
+      {{ k8s_platform_release['values']
+         | map('regex_replace', '^', k8s_platform_rendered_dir ~ '/values/')
+         | map('nighthawk_read_file') | map('from_yaml')
+         | list | combine(recursive=true) | combine(k8s_platform_set_values, recursive=true) }}
+  when: k8s_platform_release.kind == 'release'
+
+- name: "Install and wait until it is healthy: {{ k8s_platform_release.name }}"
+  when: k8s_platform_release.kind == 'release'
+  block:
+    - name: "Install or upgrade {{ k8s_platform_release.name }}"
+      kubernetes.core.helm:
+        kubeconfig: "{{ k8s_platform_kubeconfig }}"
+        binary_path: "{{ k8s_platform_helm }}"
+        name: "{{ k8s_platform_release.name }}"
+        chart_ref: "{{ k8s_platform_chart_ref }}"
+        release_namespace: "{{ k8s_platform_release.namespace }}"
+        create_namespace: true
+        # One merged document rather than files plus overrides: the module then compares exactly
+        # what is deployed with what is wanted, and an unchanged release is left alone.
+        release_values: "{{ k8s_platform_merged_values }}"
+        wait: true
+        wait_timeout: "{{ k8s_platform_release.wait_seconds }}s"
+  rescue:
+    - name: Ask which workloads are not ready
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ k8s_platform_kubeconfig }}"
+        kind: Pod
+        namespace: "{{ k8s_platform_release.namespace }}"
+      register: k8s_platform_pods
+
+    - name: Fail, naming the release and the workloads
+      ansible.builtin.fail:
+        msg: >-
+          Release {{ k8s_platform_release.name }} did not become healthy within
+          {{ k8s_platform_release.wait_seconds }} seconds. Not ready in {{ k8s_platform_release.namespace }}:
+          {{ k8s_platform_pods.resources
+             | rejectattr('status.phase', 'equalto', 'Succeeded')
+             | selectattr('status.conditions', 'defined')
+             | rejectattr('status.conditions', 'contains', {'type': 'Ready', 'status': 'True'})
+             | map(attribute='metadata.name') | sort | join(', ')
+             | default('no pod reports a problem; see the release with `helm status`', true) }}.
+          {{ ansible_failed_result.msg | default('') | truncate(600) }}
+          Later releases were not installed.
+
+- name: "Apply resource by resource: {{ k8s_platform_release.name }}"
+  ansible.builtin.include_tasks: manifests.yml
+  when: k8s_platform_release.kind == 'manifests'
+
+- name: "Run {{ k8s_platform_release.name }}"
+  ansible.builtin.include_tasks: job.yml
+  when: k8s_platform_release.kind == 'job'
+
+- name: "Wait for the job of {{ k8s_platform_release.name }}"
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ k8s_platform_kubeconfig }}"
+    api_version: batch/v1
+    kind: Job
+    namespace: "{{ k8s_platform_release.namespace }}"
+    name: "{{ k8s_platform_release.wait_job }}"
+  register: k8s_platform_waited_job
+  until: (k8s_platform_waited_job.resources | first | default({})).status.succeeded | default(0) | int > 0
+  retries: "{{ (k8s_platform_release.wait_seconds | int / 6) | int }}"
+  delay: 6
+  failed_when: false
+  when: k8s_platform_release.wait_job is defined and not ansible_check_mode
+
+- name: "Fail when it did not complete: {{ k8s_platform_release.name }}"
+  ansible.builtin.fail:
+    msg: >-
+      Job {{ k8s_platform_release.wait_job }} of release {{ k8s_platform_release.name }} did not complete within
+      {{ k8s_platform_release.wait_seconds }} seconds. See its log with
+      `kubectl -n {{ k8s_platform_release.namespace }} logs job/{{ k8s_platform_release.wait_job }}`.
+      Later releases were not installed.
+  when:
+    - k8s_platform_release.wait_job is defined
+    - not ansible_check_mode
+    - (k8s_platform_waited_job.resources | first | default({})).status.succeeded | default(0) | int == 0
+
+- name: "Wait for the secrets and certificates the release asked for: {{ k8s_platform_release.name }}"
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ k8s_platform_kubeconfig }}"
+    kind: Secret
+    namespace: "{{ k8s_platform_release.namespace }}"
+  register: k8s_platform_secrets
+  until: >-
+    k8s_platform_release.expect_secrets
+    | difference(k8s_platform_secrets.resources | map(attribute='metadata.name') | list) | length == 0
+  retries: 30
+  delay: 6
+  failed_when: false
+  no_log: true
+  when: k8s_platform_release.expect_secrets is defined and not ansible_check_mode
+
+- name: "Fail, naming what Vault did not deliver for {{ k8s_platform_release.name }}"
+  ansible.builtin.fail:
+    msg: >-
+      These secrets or certificates did not appear in {{ k8s_platform_release.namespace }}:
+      {{ k8s_platform_release.expect_secrets
+         | difference(k8s_platform_secrets.resources | map(attribute='metadata.name') | list) | sort | join(', ') }}.
+      Each `vault-<workload>-...` name needs the Vault role nighthawk-<workload>, and a certificate needs
+      the role nighthawk-certificate-issuer. Run `python -m nighthawk doctor --cluster` with the rendered
+      vault/kubernetes-auth.json to see what Vault is missing. Later releases were not installed.
+  when:
+    - k8s_platform_release.expect_secrets is defined
+    - not ansible_check_mode
+    - >-
+      k8s_platform_release.expect_secrets
+      | difference(k8s_platform_secrets.resources | map(attribute='metadata.name') | list) | length > 0
+
+- name: "Read the address pods reach the gateway at, from {{ k8s_platform_release.name }}"
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ k8s_platform_kubeconfig }}"
+    kind: Service
+    namespace: "{{ k8s_platform_release.namespace }}"
+    name: "{{ k8s_platform_release.gateway_service }}"
+  register: k8s_platform_gateway_service
+  when: k8s_platform_release.gateway_service is defined and not ansible_check_mode
+
+- name: Remember that address under the gateway's host names
+  ansible.builtin.set_fact:
+    k8s_platform_host_aliases:
+      - ip: "{{ k8s_platform_gateway_service.resources[0].spec.clusterIP }}"
+        hostnames: "{{ k8s_platform_releases.gateway_hostnames }}"
+  when: k8s_platform_release.gateway_service is defined and not ansible_check_mode

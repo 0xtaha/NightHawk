@@ -1,0 +1,15 @@
+# Managed by the NightHawk k8s_addons role.
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: nighthawk
+spec:
+  addresses: {{ k8s_addons_load_balancer_pool | to_json }}
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: nighthawk
+spec:
+  ipAddressPools:
+    - nighthawk

@@ -23,5 +23,8 @@ spec:
     tunnelProtocol: vxlan
     tunnelPort: {{ nighthawk.cluster.overlay_port }}
     MTU: {{ k3s_node_mtu }}
+    # The platform's NetworkPolicies name the cluster API and the kubelets by address,
+    # because they are not pods. Without this an address block never matches a node.
+    policyCIDRMatchMode: nodes
     operator:
       replicas: {{ cilium_operator_replicas }}

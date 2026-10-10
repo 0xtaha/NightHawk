@@ -1,0 +1,169 @@
+{{- if .Values.enabled.storage }}
+# Development object storage: one SeaweedFS process with the same flags the Compose profile
+# runs it with. Production uses the upstream chart with replicated components instead.
+apiVersion: v1
+kind: Service
+metadata:
+  name: seaweedfs
+  labels: {{- include "nighthawk.labels" . | nindent 4 }}
+spec:
+  # The storage process reaches its own components through this name while it starts, before
+  # it can report ready.
+  publishNotReadyAddresses: true
+  # The bucket job carries the same component label, for the network policies. It is not the
+  # storage server, so the service selects on the server's own label as well.
+  selector:
+    {{- include "nighthawk.component" "object-storage" | nindent 4 }}
+    nighthawk.io/storage: server
+  ports:
+    - {name: s3, port: 8333, targetPort: 8333}
+    - {name: master, port: 9333, targetPort: 9333}
+    - {name: master-grpc, port: 19333, targetPort: 19333}
+    # The bucket job's shell also talks to the filer and the volume server.
+    - {name: filer, port: 8888, targetPort: 8888}
+    - {name: filer-grpc, port: 18888, targetPort: 18888}
+    - {name: volume, port: 8080, targetPort: 8080}
+    - {name: volume-grpc, port: 18080, targetPort: 18080}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: seaweedfs
+  labels: {{- include "nighthawk.labels" . | nindent 4 }}
+spec:
+  serviceName: seaweedfs
+  replicas: 1
+  selector:
+    matchLabels: {{- include "nighthawk.component" "object-storage" | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nighthawk.labels" . | nindent 8 }}
+        {{- include "nighthawk.component" "object-storage" | nindent 8 }}
+        nighthawk.io/storage: server
+    spec:
+      serviceAccountName: object-storage
+      automountServiceAccountToken: false
+      {{- include "nighthawk.podSecurity" . | nindent 6 }}
+      initContainers:
+        # Builds the S3 identity file from the synchronized storage identities. It is never
+        # stored anywhere but this pod's memory-backed volume.
+        - name: identities
+          image: {{ .Values.images.platform | quote }}
+          args:
+            - render-storage-config
+            - --config=/etc/nighthawk/platform/platform.yaml
+            - --secrets-dir=/run/nighthawk/secrets
+            - --output-dir=/etc/nighthawk/storage
+          {{- include "nighthawk.containerSecurity" . | nindent 10 }}
+          volumeMounts:
+            - {name: platform, mountPath: /etc/nighthawk/platform, readOnly: true}
+            - {name: secrets, mountPath: /run/nighthawk/secrets/kv, readOnly: true}
+            - {name: rendered, mountPath: /etc/nighthawk/storage}
+      containers:
+        - name: seaweedfs
+          image: {{ .Values.images.seaweedfs | quote }}
+          command: ["weed"]
+          # With a certificate and no separate HTTPS port, the S3 port serves TLS only.
+          args:
+            - server
+            - -dir=/data
+            - -ip=seaweedfs
+            - -ip.bind=0.0.0.0
+            - -volume.max=100
+            - -master.volumeSizeLimitMB=1024
+            - -s3
+            - -s3.port=8333
+            - -s3.config=/etc/nighthawk/storage/s3.json
+            - -s3.cert.file=/etc/nighthawk/tls/tls.crt
+            - -s3.key.file=/etc/nighthawk/tls/tls.key
+            - -s3.port.iceberg=0
+            - -s3.port.lance=0
+          ports:
+            - {name: s3, containerPort: 8333}
+            - {name: master, containerPort: 9333}
+            - {name: master-grpc, containerPort: 19333}
+          # Probed over the network, not with a command in the container: the image's HTTPS
+          # client leaves a defunct helper process behind on every call, and nothing reaps it.
+          startupProbe:
+            httpGet: {path: /cluster/healthz, port: 9333}
+            periodSeconds: 3
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8333, scheme: HTTPS}
+            periodSeconds: 5
+            failureThreshold: 6
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources: {{- toYaml (.Values.resources.seaweedfs | default dict) | nindent 12 }}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: rendered, mountPath: /etc/nighthawk/storage, readOnly: true}
+            - {name: tls, mountPath: /etc/nighthawk/tls, readOnly: true}
+      volumes:
+        - name: platform
+          configMap: {name: nighthawk-platform}
+        - name: rendered
+          emptyDir: {medium: Memory}
+        - name: tls
+          secret:
+            secretName: storage-server-tls
+            defaultMode: 0440
+        {{- include "nighthawk.secretsVolume" (dict "root" . "name" "object-storage") | nindent 8 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.storage.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.storage.size }}
+{{- end }}
+{{- if .Values.enabled.storageInit }}
+---
+# Creates every declared bucket and confirms each exists. Creating an existing bucket is a
+# no-op, so the job is safe to repeat.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: storage-init
+  labels: {{- include "nighthawk.labels" . | nindent 4 }}
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        {{- include "nighthawk.labels" . | nindent 8 }}
+        {{- include "nighthawk.component" "object-storage" | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      {{- include "nighthawk.podSecurity" . | nindent 6 }}
+      containers:
+        - name: storage-init
+          image: {{ .Values.images.seaweedfs | quote }}
+          command: ["/bin/sh", "/opt/nighthawk/storage-init.sh"]
+          env:
+            - {name: NIGHTHAWK_STORAGE_MASTER, value: "seaweedfs:9333"}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - {name: script, mountPath: /opt/nighthawk, readOnly: true}
+            - {name: buckets, mountPath: /etc/nighthawk/storage, readOnly: true}
+      volumes:
+        - name: script
+          configMap:
+            name: nighthawk-storage
+            items: [{key: storage-init.sh, path: storage-init.sh}]
+        - name: buckets
+          configMap:
+            name: nighthawk-storage
+            items: [{key: buckets.txt, path: buckets.txt}]
+{{- end }}

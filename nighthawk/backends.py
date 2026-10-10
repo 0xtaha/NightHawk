@@ -168,8 +168,16 @@ _RENDERERS = {"metrics": _mimir, "logs": _loki, "traces": _tempo, "profiles": _p
 def render_backends(
     platform: Platform, versions_path: Path = ROOT / "config" / "versions.yaml"
 ) -> dict[str, str] | None:
-    """Return {backend: configuration YAML} for the Docker profile, or None for other deployments."""
-    if platform.deployment != "docker":
+    """Return {backend: configuration YAML}, or None where none is rendered.
+
+    Docker and the development profile of self-hosted Kubernetes run every backend as one
+    process with the same reviewed configuration. The distributed production configuration is
+    produced with the Kubernetes values, not here.
+    """
+    monolithic = platform.deployment == "docker" or (
+        platform.deployment == "self-hosted-k8s" and platform.profile == "development"
+    )
+    if not monolithic:
         return None
     pinned = mapping(mapping(load_yaml(versions_path)).get("backends"))
     enabled = {signal for stream in platform.streams for signal in stream.signals}

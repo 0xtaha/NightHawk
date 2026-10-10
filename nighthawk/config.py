@@ -6,7 +6,7 @@ import ipaddress
 import json
 import math
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -180,6 +180,14 @@ class Vault:
     pki_mount: str
     server_role: str
     client_role: str
+    # Self-hosted Kubernetes only: the mount where the cluster's service accounts authenticate,
+    # and the address the cluster reaches Vault at when it differs from `address`.
+    kubernetes_auth_mount: str | None = None
+    cluster_address: str | None = None
+
+    @property
+    def address_in_cluster(self) -> str:
+        return self.cluster_address or self.address
 
     @property
     def loopback(self) -> bool:
@@ -375,12 +383,29 @@ UPSTREAM_DESTINATION = {
 }
 
 
-def _vault(data: dict, profile: str) -> Vault:
+def _vault(data: dict, profile: str, deployment: str) -> Vault:
     pki = mapping(data["pki"])
     vault = Vault(
         string(data["address"]), data.get("namespace"), data.get("ca_file"), string(data["kv_mount"]),
         string(pki["mount"]), string(pki["server_role"]), string(pki["client_role"]),
     )
+    if "kubernetes_auth" in data:
+        if deployment != "self-hosted-k8s":
+            raise ConfigurationError(f"vault: kubernetes_auth applies to a self-hosted-k8s deployment only, not {deployment}")
+        cluster = mapping(data["kubernetes_auth"])
+        vault = replace(vault, kubernetes_auth_mount=string(cluster["mount"]), cluster_address=cluster.get("cluster_address"))
+        if vault.kubernetes_auth_mount in (vault.kv_mount, vault.pki_mount):
+            raise ConfigurationError("vault: kubernetes_auth.mount must differ from kv_mount and pki.mount")
+        if vault.cluster_address is not None:
+            in_cluster = urlsplit(vault.cluster_address)
+            try:
+                in_cluster.port
+            except ValueError as error:
+                raise ConfigurationError(f"vault: invalid kubernetes_auth.cluster_address: {error}") from error
+            if in_cluster.scheme == "http" and profile == "production":
+                raise ConfigurationError(
+                    f"vault: profile: production refuses the plaintext kubernetes_auth.cluster_address {vault.cluster_address}"
+                )
     try:
         port = urlsplit(vault.address).port
     except ValueError as error:
@@ -586,7 +611,7 @@ def load_platform(
             raise ConfigurationError("cluster: join_token_secret_ref must not reuse another secret")
     profile = string(data["profile"])
     return Platform(
-        2, deployment, profile, _vault(mapping(data["vault"]), profile), gateway, grafana, provider, bindings, secrets,
+        2, deployment, profile, _vault(mapping(data["vault"]), profile, deployment), gateway, grafana, provider, bindings, secrets,
         tuple(sorted(streams, key=lambda stream: (stream.tenant, stream.datastream))),
         tuple(sorted(credentials, key=lambda credential: credential.id)),
         join_token_ref,
@@ -643,6 +668,27 @@ def chart_version_problems(matrix: dict) -> list[str]:
     return problems
 
 
+def helm_chart_problems(matrix: dict) -> list[str]:
+    """Locked charts whose version, or the application they package, disagrees with the pin they name."""
+    problems: list[str] = []
+    for name, raw in sorted(mapping(matrix["helm_charts"]).items()):
+        entry = mapping(raw)
+        for field, reference in (("version", "version_of"), ("app_version", "app_version_of")):
+            if reference not in entry:
+                continue
+            try:
+                pinned = str(resolve_pin(matrix, string(entry[reference])))
+            except (KeyError, ConfigurationError):
+                problems.append(f"helm_charts.{name}.{reference} names {entry[reference]}, which the matrix does not have")
+                continue
+            if str(entry[field]) != pinned:
+                problems.append(
+                    f"helm_charts.{name}.{field} is {entry[field]} but {entry[reference]} pins {pinned}; "
+                    "lock the chart release that matches and record its digest"
+                )
+    return problems
+
+
 def supported_architectures(matrix: dict) -> list[str]:
     """Every architecture some supported operating system entry lists."""
     return sorted({
@@ -667,7 +713,7 @@ def artifact_checksum_problems(matrix: dict) -> list[str]:
 
 def load_versions(path: Path = ROOT / "config" / "versions.yaml") -> dict:
     matrix = load_document(path, "versions.schema.json")
-    problems = chart_version_problems(matrix) + artifact_checksum_problems(matrix)
+    problems = chart_version_problems(matrix) + artifact_checksum_problems(matrix) + helm_chart_problems(matrix)
     if problems:
         raise ConfigurationError(f"{path}:\n" + "\n".join(problems))
     vault = mapping(mapping(matrix["secrets_store"])["vault"])

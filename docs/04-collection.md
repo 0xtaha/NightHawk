@@ -105,6 +105,12 @@ one is rejected by the gateway anyway.
 - Device and service metrics: run the relevant exporter and list it in the
   `external-service` targets file, or annotate its Kubernetes service.
 
+Every profile reads its gateway credential by polling the file every 30
+seconds rather than watching it, so a collector also starts on a host that
+has no inotify instance left; a rotated credential is picked up within that
+period. The `k8s-node` and `k8s-cluster` profiles are deployed by the
+platform chart; see [Kubernetes](09-kubernetes.md).
+
 To run the `vm` or `external-service` profile as a confined systemd service
 on a machine outside the platform, with its credential and a client
 certificate that renews itself when the playbook is run again, see

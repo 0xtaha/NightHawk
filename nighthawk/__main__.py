@@ -15,11 +15,11 @@ import yaml
 from nighthawk.config import (
     ConfigurationError, ROOT, check_pins, load_network, load_platform, load_versions, validate_migration,
 )
-from nighthawk import ansible_inputs, authz, backends, collector, fixtures, gateway, grafana, quickstart, tools, trust, vault
+from nighthawk import ansible_inputs, authz, backends, collector, fixtures, gateway, grafana, kube, quickstart, storage, tools, trust, vault
 from nighthawk.cluster_layout import layout_problems
 from nighthawk.overrides import render_overrides
 from nighthawk.secrets import (
-    MATERIALIZED_SECRETS_DIR, cleanup, doctor, ensure_doctor_ok, materialize, rotate_secret, store_secret,
+    MATERIALIZED_SECRETS_DIR, Check, cleanup, doctor, ensure_doctor_ok, materialize, rotate_secret, store_secret,
 )
 
 
@@ -64,6 +64,9 @@ def main(argv: list[str] | None = None) -> int:
     _add_contract_arguments(render_parser)
     render_parser.add_argument("--output", type=Path, required=True, help="New directory for non-secret contract artifacts")
     render_parser.add_argument("--versions", type=Path, default=ROOT / "config" / "versions.yaml")
+    render_parser.add_argument("--collector-tenant", help="Self-hosted Kubernetes: tenant the cluster's collectors deliver to (default: the first)")
+    render_parser.add_argument("--collector-datastream", help="Self-hosted Kubernetes: datastream of that tenant")
+    render_parser.add_argument("--collector-credential", help="Self-hosted Kubernetes: ingestion credential ID, when several qualify")
     render_parser.add_argument(
         "--credential", action="append", default=[],
         help="Query credential ID for a datastream that declares several; repeat per datastream",
@@ -73,6 +76,10 @@ def main(argv: list[str] | None = None) -> int:
     check_pins_parser.add_argument("--versions", type=Path, default=ROOT / "config" / "versions.yaml")
 
     doctor_parser = subparsers.add_parser("doctor", help="Check the declared Vault before anything uses it")
+    doctor_parser.add_argument(
+        "--cluster", type=Path, metavar="REQUIREMENTS",
+        help="Also compare Vault with the rendered vault/kubernetes-auth.json of a cluster deployment",
+    )
 
     store_secret_parser = subparsers.add_parser("store-secret", help="Store a value that does not exist yet")
     rotate_secret_parser = subparsers.add_parser("rotate-secret", help="Replace an existing value with a new version")
@@ -88,6 +95,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     bootstrap_parser.add_argument("--confirm-disposable-vault", action="store_true")
     bootstrap_parser.add_argument("--ca-valid-days", type=int, required=True)
+    bootstrap_parser.add_argument(
+        "--cluster-requirements", type=Path,
+        help="Also apply the rendered vault/kubernetes-auth.json, so a cluster can authenticate",
+    )
+    bootstrap_parser.add_argument(
+        "--kubernetes-host", help="With --cluster-requirements: the cluster API address Vault validates service account tokens at",
+    )
 
     clean_secrets_parser = subparsers.add_parser("clean-secrets")
     clean_secrets_parser.add_argument("--output-dir", type=Path, default=MATERIALIZED_SECRETS_DIR)
@@ -103,6 +117,14 @@ def main(argv: list[str] | None = None) -> int:
     collector_parser.add_argument("--self-monitoring", action="store_true", help="Also scrape backends, gateway, and auth service")
     collector_parser.add_argument("--otlp-only", action="store_true", help="Omit host sources; receive pushed telemetry only")
     collector_parser.add_argument("--output", type=Path, required=True, help="New directory for the collector configuration")
+
+    storage_config_parser = subparsers.add_parser(
+        "render-storage-config", help="Write the local object storage's identity file from materialized secrets",
+    )
+    storage_config_parser.add_argument("--config", type=Path, required=True)
+    storage_config_parser.add_argument("--network", type=Path, default=ROOT / "config" / "network.yaml")
+    storage_config_parser.add_argument("--secrets-dir", type=Path, default=MATERIALIZED_SECRETS_DIR)
+    storage_config_parser.add_argument("--output-dir", type=Path, required=True, help="Existing directory; s3.json is replaced atomically")
 
     policy_parser = subparsers.add_parser("render-gateway-policy")
     policy_parser.add_argument("--config", type=Path, required=True)
@@ -164,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
         "--layout", required=True, help="JSON file written by the k3s_prerequisites role, or - for standard input",
     )
 
-    fetch_parser = subparsers.add_parser("fetch-tools", help="Download the pinned Terraform, verified by checksum")
+    fetch_parser = subparsers.add_parser("fetch-tools", help="Download the pinned Terraform, Helm, kubectl, and kubeconform, verified by checksum")
     fetch_parser.add_argument("--versions", type=Path, default=ROOT / "config" / "versions.yaml")
     fetch_parser.add_argument("--tools-dir", type=Path, default=tools.TOOLS_DIR)
 
@@ -272,7 +294,7 @@ def main(argv: list[str] | None = None) -> int:
                 installed = tools.fetch_tools(load_versions(args.versions), args.tools_dir)
                 print(
                     f"Installed {', '.join(installed)} into {args.tools_dir}" if installed
-                    else f"terraform is already present in {args.tools_dir}"
+                    else f"Every pinned tool is already present in {args.tools_dir}"
                 )
             elif args.command == "wait-http":
                 tools.wait_http(args.url, args.timeout)
@@ -294,6 +316,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "serve-authz":
         try:
             return authz.serve(args.policy, args.listen)
+        except (ConfigurationError, OSError) as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+
+    if args.command == "render-storage-config":
+        try:
+            platform = load_platform(args.config, network=args.network)
+            identities = storage.s3_identities(platform, grafana.secret_reader(platform, args.secrets_dir))
+            target = args.output_dir / "s3.json"
+            temporary = target.with_name(target.name + ".tmp")
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(identities, indent=2, sort_keys=True) + "\n")
+            os.replace(temporary, target)
+            print(f"Wrote {len(identities['identities'])} storage identit(ies) to {target}.")
+            return 0
         except (ConfigurationError, OSError) as error:
             print(f"error: {error}", file=sys.stderr)
             return 1
@@ -339,8 +377,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "doctor":
         try:
-            checks, _ = doctor(load_versions(args.versions), load_platform(args.config, network=args.network), _auth(args))
-        except ConfigurationError as error:
+            checks, client = doctor(load_versions(args.versions), load_platform(args.config, network=args.network), _auth(args))
+            if args.cluster is not None and client is not None:
+                requirements = json.loads(args.cluster.read_text(encoding="utf-8"))
+                try:
+                    problems = vault.cluster_access_problems(client, requirements)
+                except vault.VaultError as error:
+                    problems = [f"the cluster requirements cannot be compared with this credential: {error}"]
+                checks += [Check("cluster", False, problem) for problem in problems] or [Check(
+                    "cluster", True,
+                    f"authentication mount {requirements['mount']} has the {len(requirements['roles'])} rendered role(s) and policies",
+                )]
+        except (ConfigurationError, OSError, ValueError) as error:
             print(f"error: {error}", file=sys.stderr)
             return 1
         for check in checks:
@@ -350,13 +398,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "bootstrap-dev-vault":
         try:
             platform = load_platform(args.config, network=args.network)
+            client = vault.connect(platform, _auth(args))
             created = vault.bootstrap_dev(
-                platform, vault.connect(platform, _auth(args)),
-                confirmed=args.confirm_disposable_vault, ca_valid_days=args.ca_valid_days,
+                platform, client, confirmed=args.confirm_disposable_vault, ca_valid_days=args.ca_valid_days,
             )
+            if args.cluster_requirements is not None:
+                requirements = json.loads(args.cluster_requirements.read_text(encoding="utf-8"))
+                created += vault.apply_cluster_access(client, requirements, args.kubernetes_host)
+            elif args.kubernetes_host is not None:
+                raise ConfigurationError("--kubernetes-host only applies with --cluster-requirements")
             print("Configured the development Vault: " + (", ".join(created) if created else "nothing to change"))
             return 0
-        except (ConfigurationError, OSError) as error:
+        except (ConfigurationError, OSError, ValueError) as error:
             print(f"error: {error}", file=sys.stderr)
             return 1
 
@@ -474,7 +527,17 @@ def main(argv: list[str] | None = None) -> int:
                 ),
             }
             artifacts.update(gateway.render_artifacts(platform, rules))
-            artifacts.update(vault.access_requirements(platform))
+            cluster_workloads = None
+            if platform.deployment == "self-hosted-k8s" and platform.vault.kubernetes_auth_mount is not None:
+                cluster_workloads = kube.workloads(
+                    platform, tenant=args.collector_tenant, datastream=args.collector_datastream,
+                    ingest_credential=args.collector_credential, query_credentials=tuple(args.credential),
+                )
+            artifacts.update(vault.access_requirements(
+                platform,
+                vault.cluster_access(platform, cluster_workloads, kube.NAMESPACE, kube.ISSUER, (kube.GATEWAY_NAMESPACE,))
+                if cluster_workloads else None,
+            ))
             artifacts.update(ansible_inputs.render_ansible_inputs(platform, rules, load_versions(args.versions)))
             backend_documents = backends.render_backends(platform)
             for backend, document in (backend_documents or {}).items():
@@ -482,12 +545,22 @@ def main(argv: list[str] | None = None) -> int:
             artifacts["grafana/desired-state.json"] = (
                 json.dumps(grafana.desired_state(platform, args.credential), indent=2, sort_keys=True) + "\n"
             )
+            if cluster_workloads is not None and platform.profile == "development":
+                artifacts.update(kube.render_kubernetes(
+                    platform, rules, load_versions(args.versions),
+                    {**artifacts, "platform.yaml": args.config.read_text(encoding="utf-8")},
+                    kube.Selection(
+                        args.collector_tenant, args.collector_datastream, args.collector_credential, tuple(args.credential),
+                    ),
+                ))
             for name, content in artifacts.items():
-                (output / name).parent.mkdir(mode=0o700, exist_ok=True)
+                (output / name).parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                 with (output / name).open("x", encoding="utf-8", newline="\n") as handle:
                     handle.write(content)
             print(f"Rendered non-secret contracts to {output}; no deployment was generated.")
-            if backend_documents is None:
+            if cluster_workloads is not None and platform.profile != "development":
+                print(kube.PRODUCTION_NOT_RENDERED + ".")
+            elif backend_documents is None:
                 print(f"Backend configuration is not rendered for the {platform.deployment} deployment yet.")
         else:
             print(f"Valid contracts: {len(platform.streams)} datastream(s), {len(rules)} network rule(s).")

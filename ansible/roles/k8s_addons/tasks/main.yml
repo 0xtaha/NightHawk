@@ -1,0 +1,25 @@
+# Installs what the platform needs from the cluster, each from a chart whose digest matches
+# the compatibility matrix. Which add-ons a profile gets is decided when it is rendered.
+- name: Check the rendered deployment against this cluster
+  ansible.builtin.include_role:
+    name: k8s_platform
+    tasks_from: check
+    # The rendered release list and the connection settings are that role's; share them.
+    public: true
+
+- name: Install each add-on in order
+  ansible.builtin.include_role:
+    name: k8s_platform
+    tasks_from: release
+  loop: "{{ k8s_platform_releases.addons }}"
+  loop_control:
+    loop_var: k8s_platform_release
+    label: "{{ k8s_platform_release.name }}"
+
+- name: Give the load balancer the address pool the cluster preflight accepted
+  kubernetes.core.k8s:
+    kubeconfig: "{{ k8s_platform_kubeconfig }}"
+    namespace: "{{ k8s_addons_load_balancer_namespace }}"
+    definition: "{{ lookup('ansible.builtin.template', 'load-balancer-pool.yaml.j2') | from_yaml_all | list }}"
+    apply: true
+    state: present

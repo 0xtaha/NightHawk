@@ -195,9 +195,13 @@ decision is replaced:
   not an open-source licence. The platform uses only Vault's HTTP API. Only
   HashiCorp Vault is in the compatibility matrix and tested; API-compatible
   servers such as OpenBao are untested.
-- **Deferred to phase 6.** How secrets reach workloads inside Kubernetes
-  (an agent, an operator, or a Kubernetes auth method) is decided when those
-  workloads exist. Host-side materialization is the only delivery implemented.
+- **In Kubernetes.** Decided in phase 6: workloads get their secrets through
+  the Vault Secrets Operator and their certificates from Vault's PKI through
+  cert-manager, each authenticating as its own service account. No Vault
+  credential is stored in the cluster. This changes the first point above
+  for Kubernetes only: the cluster reads Vault too, read-only and each
+  workload only its own secrets; the command-line tool remains the only
+  writer. See [09-kubernetes.md](09-kubernetes.md).
 - **Not verified.** Everything has been exercised against a dev-mode Vault in
   a local container only. Namespaces, high availability, seal behaviour under
   failure, and an operator-managed PKI hierarchy have not.
@@ -321,16 +325,16 @@ data and never destroys state-bootstrap resources.
 
 ### Recorded deferrals
 
-Items that `Plan.md` todos 1 to 5 name and that are deliberately not built
+Items that `Plan.md` todos 1 to 6 name and that are deliberately not built
 or not verified yet. The same list is an amendment in `Plan.md`.
 
 | Item | Owned by | Why later |
 | --- | --- | --- |
 | Verification of the host automation on real machines | Open | Phase 5 pinned the Ansible tooling and tested every role in containers of each supported system; no playbook has run on a real host. See [08-ansible.md](08-ansible.md#verification-limits) |
-| Chart lockfiles and Kubernetes image digests | Phase 6 | There is no chart to lock until the workloads are added |
+| The production profile of self-hosted Kubernetes: distributed backends, Kafka, replicated storage, shared PostgreSQL, Longhorn, availability settings | Open | Phase 6 delivered the development profile only; see [09-kubernetes.md](09-kubernetes.md) |
+| Image digests for the add-ons only production installs (Longhorn, Strimzi, CloudNativePG) | With the production profile | Every chart is locked by digest, and the images of everything the development profile runs are pinned |
 | IAM for the AWS load balancer controller | Phase 6 | Its policy is published per controller release, and none is pinned yet |
 | Standalone firewall-format outputs: documented UFW or iptables rule examples, AWS SG/NACL examples | Phase 8 | Host rules are generated and applied by the Ansible `firewall` role; outside it only the port table and a JSON copy of the contract are generated |
-| MetalLB, Longhorn, Traefik, and cert-manager on the k3s cluster | Phase 6 | Phase 5 checks their prerequisites; they are installed with the workloads that need them |
 | An AWS example platform document | Phase 6 | Nothing consumes one until the EKS workloads exist |
 | Prerequisite checks beyond Vault and Terraform | Phase 9 | They belong with the orchestration that needs the other tools |
 | Modelled backups, and an expiry for old state-bucket versions | Phase 10 | They belong with backup and restore |
