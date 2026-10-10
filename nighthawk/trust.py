@@ -10,6 +10,8 @@ import datetime
 import json
 import os
 import secrets as token_source
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -34,6 +36,21 @@ def generate_credential(platform: Platform, credential_id: str, client: Client) 
     if credential is None:
         raise ConfigurationError(f"unknown credential {credential_id!r}")
     return store_secret(client, platform, credential.secret_ref, token_source.token_urlsafe(32))
+
+
+def generate_cluster_token(platform: Platform, client: Client) -> tuple[SecretReference, bool]:
+    """Create the cluster join token once; return its reference and whether it was created now.
+
+    An existing token is never replaced, because nodes already hold it, and Vault is not written to.
+    """
+    secret_ref = platform.cluster_join_token_secret_ref
+    if secret_ref is None:
+        raise ConfigurationError("the platform document declares no cluster.join_token_secret_ref")
+    reference = platform.secrets[secret_ref]
+    if reference.key in client.kv_read(reference.path)[0]:
+        return reference, False
+    # k3s accepts any string; hexadecimal avoids every quoting question in a file or a unit.
+    return store_secret(client, platform, secret_ref, token_source.token_hex(32)), True
 
 
 def storage_identity_refs(platform: Platform) -> list[str]:
@@ -114,17 +131,18 @@ def _verify_granted(
         fail("issuer")
 
 
-def issue_certificate(
-    platform: Platform, output_dir: Path, valid_days: int | None, client: Client, *,
-    credential_id: str | None = None, server: bool = False, storage: bool = False,
-) -> IssuedCertificate:
-    """Obtain a collector client certificate, the gateway server certificate, or the storage server certificate."""
+@dataclass(frozen=True)
+class _Target:
+    stem: str
+    common_name: str
+    role: str
+    names: list[x509.GeneralName]
+    usage: x509.ObjectIdentifier
+
+
+def _target(platform: Platform, credential_id: str | None, server: bool, storage: bool) -> _Target:
     if (credential_id is not None) + server + storage != 1:
         raise ConfigurationError("choose exactly one of a credential, the gateway server, or the storage server")
-    if valid_days is None:
-        raise ConfigurationError("an explicit validity period is required; there is no default")
-    if isinstance(valid_days, bool) or not isinstance(valid_days, int) or valid_days < 1:
-        raise ConfigurationError("an explicit validity of at least one day is required")
     gateway = platform.gateway
     if server:
         # One certificate for both names served by the gateway listener.
@@ -144,14 +162,90 @@ def issue_certificate(
         role = platform.vault.client_role
         names = [x509.UniformResourceIdentifier(credential.certificate_identity)]
         usage = ExtendedKeyUsageOID.CLIENT_AUTH
-    certificate_path, key_path = output_dir / f"{stem}.crt.pem", output_dir / f"{stem}.key.pem"
-    for path in (certificate_path, key_path):
-        if path.exists():
-            raise ConfigurationError(f"{path}: refusing to overwrite an existing certificate or key")
+    return _Target(stem, common_name, role, names, usage)
+
+
+def _check_validity(valid_days: int | None) -> None:
+    if valid_days is None:
+        raise ConfigurationError("an explicit validity period is required; there is no default")
+    if isinstance(valid_days, bool) or not isinstance(valid_days, int) or valid_days < 1:
+        raise ConfigurationError("an explicit validity of at least one day is required")
+
+
+def _authority(client: Client) -> x509.Certificate:
     try:
-        authority = x509.load_pem_x509_certificate(authority_certificate(client).encode("ascii"))
+        return x509.load_pem_x509_certificate(authority_certificate(client).encode("ascii"))
     except ValueError as error:
         raise ConfigurationError(f"the PKI mount's authority certificate is unusable: {error}") from error
+
+
+def needs_issue(
+    certificate_path: Path, key_path: Path, authority: x509.Certificate, renew_before: datetime.timedelta,
+) -> bool:
+    """Missing, unreadable, expiring within the period, or signed by an authority Vault no longer has."""
+    if not certificate_path.exists() or not key_path.exists():
+        return True
+    try:
+        certificate = x509.load_pem_x509_certificate(certificate_path.read_bytes())
+        certificate.verify_directly_issued_by(authority)
+    except (ValueError, TypeError, InvalidSignature):
+        return True
+    return certificate.not_valid_after_utc - datetime.datetime.now(datetime.timezone.utc) < renew_before
+
+
+def issue_certificate(
+    platform: Platform, output_dir: Path, valid_days: int | None, client: Client, *,
+    credential_id: str | None = None, server: bool = False, storage: bool = False,
+) -> IssuedCertificate:
+    """Obtain a collector client certificate, the gateway server certificate, or the storage server certificate."""
+    target = _target(platform, credential_id, server, storage)
+    _check_validity(valid_days)
+    for path in (output_dir / f"{target.stem}.crt.pem", output_dir / f"{target.stem}.key.pem"):
+        if path.exists():
+            raise ConfigurationError(f"{path}: refusing to overwrite an existing certificate or key")
+    return _issue(target, output_dir, valid_days, client, _authority(client))
+
+
+def ensure_certificate(
+    platform: Platform, output_dir: Path, valid_days: int | None, client: Client, renew_before_days: int | None, *,
+    credential_id: str | None = None, server: bool = False, storage: bool = False,
+) -> IssuedCertificate | None:
+    """Issue only when the pair is missing, expiring within the period, or from another authority.
+
+    Returns None when there was nothing to do. A replacement is requested and verified in a
+    directory beside the pair and renamed into place afterwards, so a failed request leaves
+    the existing certificate and key as they were.
+    """
+    target = _target(platform, credential_id, server, storage)
+    _check_validity(valid_days)
+    if isinstance(renew_before_days, bool) or not isinstance(renew_before_days, int) or renew_before_days < 0:
+        raise ConfigurationError("a renewal period of zero or more days is required with --if-needed")
+    if renew_before_days >= valid_days:
+        raise ConfigurationError(
+            f"a renewal period of {renew_before_days} day(s) is not shorter than the validity of {valid_days} day(s); "
+            "every run would issue a new certificate"
+        )
+    certificate_path, key_path = output_dir / f"{target.stem}.crt.pem", output_dir / f"{target.stem}.key.pem"
+    authority = _authority(client)
+    if not needs_issue(certificate_path, key_path, authority, datetime.timedelta(days=renew_before_days)):
+        return None
+    output_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{target.stem}.", dir=output_dir))
+    try:
+        issued = _issue(target, staging, valid_days, client, authority)
+        # The key first: a certificate without its key is the state a later run repairs.
+        os.replace(issued.key_path, key_path)
+        os.replace(issued.certificate_path, certificate_path)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    return IssuedCertificate(certificate_path, key_path, issued.fingerprint)
+
+
+def _issue(
+    target: _Target, output_dir: Path, valid_days: int, client: Client, authority: x509.Certificate,
+) -> IssuedCertificate:
+    stem, common_name, role, names, usage = target.stem, target.common_name, target.role, target.names, target.usage
+    certificate_path, key_path = output_dir / f"{stem}.crt.pem", output_dir / f"{stem}.key.pem"
     not_after = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=valid_days)
     if not_after > authority.not_valid_after_utc:
         raise ConfigurationError("requested validity outlives the certificate authority")

@@ -1,0 +1,79 @@
+# Compose decides what to create or recreate; this file only builds, starts, waits, and tells
+# the services that do not watch their files to read them again.
+- name: See whether the stack is already running
+  ansible.builtin.command:
+    argv: "{{ nighthawk_stack_compose + ['ps', '--quiet'] }}"
+  register: nighthawk_stack_running
+  changed_when: false
+  check_mode: false
+
+- name: Look for the platform's own image
+  ansible.builtin.command:
+    argv: "{{ nighthawk_stack_compose + ['images', '--quiet', nighthawk_stack_manifest.build_service] }}"
+  register: nighthawk_stack_image
+  changed_when: false
+  check_mode: false
+
+- name: Build the platform's own image
+  ansible.builtin.command:
+    argv: "{{ nighthawk_stack_compose + ['build', nighthawk_stack_manifest.build_service] }}"
+  changed_when: true
+  when: nighthawk_stack_source_changed or nighthawk_stack_image.stdout | trim | length == 0
+
+- name: Start the stack and wait until it is healthy
+  block:
+    - name: Start the services
+      ansible.builtin.command:
+        argv: >-
+          {{ nighthawk_stack_compose
+             + (nighthawk_stack_manifest.profiles | map('regex_replace', '^', '--profile=') | list)
+             + ['up', '--detach', '--wait', '--wait-timeout', nighthawk_stack_manifest.wait_timeout | string]
+             + nighthawk_stack_manifest.waited_services }}
+      register: nighthawk_stack_up
+      changed_when: nighthawk_stack_up.stderr is search('(Created|Recreated|Started)')
+      timeout: "{{ nighthawk_stack_manifest.wait_timeout | int + 60 }}"
+
+    - name: Wait for the collector
+      ansible.builtin.command:
+        argv: "{{ nighthawk_stack_compose + ['run', '--rm', nighthawk_stack_manifest.wait_service] }}"
+      changed_when: false
+      timeout: "{{ nighthawk_stack_manifest.wait_timeout | int }}"
+  rescue:
+    - name: Ask which services are not healthy
+      ansible.builtin.command:
+        argv: "{{ nighthawk_stack_compose + ['ps', '--all', '--format', 'json'] }}"
+      register: nighthawk_stack_states
+      changed_when: false
+      failed_when: false
+
+    - name: Fail, naming them
+      ansible.builtin.fail:
+        msg: >-
+          The stack on {{ inventory_hostname }} did not become healthy within
+          {{ nighthawk_stack_manifest.wait_timeout }} seconds. Not healthy:
+          {{ (nighthawk_stack_states.stdout_lines | default([]) | select('match', '^\{') | map('from_json')
+              | selectattr('Health', 'in', ['unhealthy', 'starting']) | map(attribute='Service') | list
+              + nighthawk_stack_states.stdout_lines | default([]) | select('match', '^\{') | map('from_json')
+                | selectattr('State', 'in', ['restarting', 'dead', 'created']) | map(attribute='Service') | list)
+             | unique | sort | join(', ') | default('unknown; run `docker compose ps` on the host', true) }}.
+          Stored telemetry was not touched.
+
+- name: Tell running services to read their changed files
+  ansible.builtin.command:
+    argv: "{{ nighthawk_stack_compose + ['kill', '--signal', nighthawk_stack_manifest.reload_signal, item] }}"
+  loop: "{{ nighthawk_stack_reloads }}"
+  changed_when: true
+  # A service that was just created has read the new files already.
+  when: nighthawk_stack_running.stdout | trim | length > 0
+
+- name: Provision Grafana
+  ansible.builtin.command:
+    argv: >-
+      {{ nighthawk_stack_compose + ['run', '--rm'] + nighthawk_stack_manifest.provision
+         + (['--update-secrets'] if nighthawk_stack_changed_files | select('match', nighthawk_stack_stored_secrets) | list else []) }}
+  vars:
+    # The secrets as Vault holds them; a changed one may be a data source password.
+    nighthawk_stack_stored_secrets: "^{{ nighthawk_stack_secrets_target | regex_escape }}/kv/"
+  # Provisioning compares with what Grafana holds and sends only differences; it prints no secret.
+  changed_when: false
+  timeout: "{{ nighthawk_stack_manifest.wait_timeout | int }}"

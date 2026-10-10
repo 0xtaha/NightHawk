@@ -1,0 +1,11 @@
+galaxy_info:
+  role_name: k3s_prerequisites
+  namespace: nighthawk
+  author: NightHawk
+  description: Checks that the declared cluster layout can work before any node is changed.
+  license: Proprietary
+  min_ansible_version: "2.21"
+  platforms:
+    - name: Ubuntu
+      versions: [jammy, noble]
+dependencies: []

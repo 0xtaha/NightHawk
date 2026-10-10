@@ -5,10 +5,16 @@
 > **Amendment:** This section and "Access and execution boundaries" describe
 > the situation before any implementation: an empty repository, a Windows
 > host, and no verified edit access. They are kept as the plan's starting
-> point, not as the present state. Phases 1 to 4 are implemented; their
-> accepted behaviour is in `openspec/specs/`, the history in
-> `openspec/changes/archive/`, and what was and was not verified in
-> `docs/01-architecture.md` and `docs/07-docker-compose.md`.
+> point, not as the present state. Todos 1 to 5 are implemented; todos 6 to
+> 10 are not started. Accepted behaviour is in `openspec/specs/`, the history
+> in `openspec/changes/archive/`, and what was and was not verified in
+> `docs/01-architecture.md`, `docs/07-docker-compose.md`, and
+> `docs/08-ansible.md`. In short: the Docker Compose profile runs end to end
+> on one machine under rootless Podman; the AWS infrastructure is validated
+> as plans only and nothing has been applied; the Ansible automation is
+> tested role by role in containers and has never run on a real host. The
+> amendments below record, per section, where the implementation differs
+> from the original text.
 
 Build the standalone LGTM+ platform at the NightHawk repository root, implementing the attached brief across Docker Compose, self-hosted Kubernetes, and AWS EKS. This is an implementation plan only; no repository files have been changed.
 
@@ -48,7 +54,26 @@ The Windows host has Python and WSL with an Ubuntu distribution. A read-only che
 
    > **Amendment:** Read MinIO here as SeaweedFS, the approved local object
    > storage; see the Storage amendments section of `docs/01-architecture.md`.
+   > Read "generated credentials and a local CA" as credentials generated
+   > into Vault and certificates signed by Vault's PKI. The local quickstart
+   > (`quickstart-docker`) publishes the gateway on loopback only and cannot
+   > publish anything else. Production single-node use is implemented as a
+   > deployment to another machine: `render-docker-deployment` renders it on
+   > a control machine, the `docker-host.yml` playbook copies and starts it,
+   > and `docker-compose/docker-compose.external.yaml` publishes the
+   > certificate-requiring entry point on an address the operator must state.
+   > It requires a `profile: production` document and is documented as
+   > non-HA in `docs/08-ansible.md`.
 2. **Self-hosted Kubernetes:** Ansible installs k3s with its bundled Flannel, Traefik, and ServiceLB disabled before installing Cilium, MetalLB, Longhorn, a pinned Traefik release, and cert-manager. Support a single-node development profile and a separately sized multi-node production profile. Production stateful replicas and storage must span distinct nodes; preflight rejects impossible replica/disk/IP-pool configurations.
+
+   > **Amendment:** Todo 5 installs k3s with those three add-ons disabled and
+   > installs Cilium, through a `HelmChart` manifest that k3s applies itself.
+   > MetalLB, Longhorn, Traefik, and cert-manager are installed with the
+   > workloads in todo 6. The preflight exists as `check-cluster-layout`: it
+   > rejects impossible server counts, storage node counts, disks, MTUs,
+   > overlapping ranges, and address pools before any node is changed. The
+   > two shapes are `development` (exactly one node) and `production` (an odd
+   > number of at least three servers, at least three storage nodes).
 3. **AWS:** Terraform provisions a VPC across availability zones, EKS managed node groups, EBS CSI, S3, KMS/IAM integration, private service connectivity, and remote state prerequisites. Use on-demand capacity for stateful workloads and optional spot capacity for suitable stateless workloads. Traefik and cert-manager provide a consistent TLS ingress model, backed by an AWS load balancer and automated DNS. Use IRSA rather than static AWS credentials.
 
 Use official Grafana charts, with a small platform chart for shared policies, gateways, provisioning resources, and integration fixtures. Use a version-pinned Strimzi-managed Kafka deployment on Kubernetes where selected backend architectures require it, with separate topics and access permissions per consumer backend. Kafka replication, disks, failure domains, monitoring, and recovery are part of the production profile, not an undocumented dependency.
@@ -57,10 +82,30 @@ Use official Grafana charts, with a small platform chart for shared policies, ga
 
 - Add `config/versions.yaml`, `config/platform.schema.json`, `config/tenants.example.yaml`, `config/network.yaml`, and environment examples.
 - Use a small typed, tested configuration renderer/orchestrator to produce environment-specific backend settings, gateway routes, tenant overrides, Grafana provisioning, Ansible inputs, and Terraform inputs where needed. Deterministic output, strict validation, actionable errors, and no silent fallback values.
+
+  > **Amendment:** The files that exist are `config/versions.yaml`,
+  > `config/network.yaml`, and `config/platform.schema.json`, each of the
+  > first two with its own schema, and two example platform documents:
+  > `config/tenants.example.yaml` (Docker) and
+  > `config/self-hosted.example.yaml` (self-hosted Kubernetes). There is no
+  > AWS example document yet. The renderer is `python -m nighthawk`;
+  > `render-contracts` writes the backend settings, gateway configuration,
+  > tenant overrides, Grafana desired state, what the platform needs from
+  > Vault, and `ansible/nighthawk.yml`, the one variables file every
+  > playbook loads. Ansible reads nothing else: no role spells out a port,
+  > version, or checksum, and a repository test enforces that.
 - Keep non-secret templates and examples in Git. Generated decrypted configuration stays in explicitly ignored directories with restrictive permissions and cleanup.
 - Each tenant/datastream entry defines a stable backend ID, credential references, enabled signals, explicit retention for each enabled signal, ingestion/query limits, and approved collection/redaction policy.
 - Treat backend ID changes as migrations, not renames. Detect duplicate IDs, delimiter ambiguity, unsupported durations, missing secret references, and credential mappings spanning unauthorized tenants.
 - The network contract owns ports, protocols, purpose, direction, and scope. Generate firewall inputs and the documentation port table from it; CI checks consumers against the contract.
+
+  > **Amendment:** Since todo 5 the contract also holds SSH administration
+  > and the node-to-node flows of a k3s cluster (API server, kubelet, etcd,
+  > Cilium overlay and health), 27 rules in all. The firewall inputs are
+  > generated: the rendered Ansible inputs carry the inbound rules per host
+  > role, and the `firewall` role turns them into UFW or firewalld rules.
+  > The checks against the contract are local tests; no CI runs them yet
+  > (todo 9).
 - Retain recognizable `terraform/`, `ansible/`, `helm/values/`, `docker-compose/`, `alloy-configs/`, `grafana/`, and `docs/` paths from the brief. Do not add fictitious Docker Helm values or empty Terraform modules solely to match an illustrative tree.
 
 ### Security and tenant boundaries
@@ -110,8 +155,17 @@ Resolve and pin a tested compatibility matrix covering Terraform/providers, Ansi
 
 > **Amendment:** "MinIO server/client availability" above was resolved by
 > replacing MinIO with SeaweedFS, explicitly and not silently; see the Storage
-> amendments section of `docs/01-architecture.md`. The Ansible collection pins
-> are deferred; see the recorded deferrals at the end of these todos.
+> amendments section of `docs/01-architecture.md`. SOPS and age are no
+> longer pinned; see the Vault amendment under "Security and tenant
+> boundaries". The Ansible pins were added in todo 5: `ansible-core`, the
+> collections, the lint and test tools, the Docker Engine version with its
+> repository signing-key fingerprints, and SHA-256 checksums for the k3s
+> binary and the Alloy archive. Each operating system entry records the
+> evidence it rests on (`container`, `host`, or `declared`); all are
+> `container` today. Longhorn, MetalLB, Traefik, cert-manager, and Strimzi
+> are pinned in the matrix but nothing installs them yet. Chart lockfiles
+> and image digests for Kubernetes are still open; see the recorded
+> deferrals at the end of these todos.
 
 Create validated platform/tenant/network schemas, examples, renderer, secret workflow, prerequisites checks, and shared test fixtures. Record supported combinations and migration constraints, including Pyroscope retention and Kafka requirements.
 
@@ -158,6 +212,55 @@ Support explicitly tested Ubuntu/Debian and RHEL-family versions for Docker host
 
 Validate SSH/admin allowlists before firewall changes; avoid locking out automation. Model Cilium/MetalLB/Longhorn kernel, disk, MTU, address-pool, and network prerequisites explicitly. Keep inventory secrets out of example files.
 
+> **Amendment: what todo 5 delivered.** The `ansible/` tree, documented in
+> `docs/08-ansible.md`.
+>
+> - **Inventories:** examples for a Docker host, a single-node and a
+>   production k3s cluster, and external collector hosts. They hold file
+>   locations, never secrets; a repository test enforces that.
+> - **Playbooks:** `docker-host.yml`, `docker-teardown.yml`,
+>   `k3s-cluster.yml`, `external-collector.yml`.
+> - **Roles:** `preflight`, `hardening`, `firewall`, `docker_engine`,
+>   `nighthawk_stack`, `k3s_prerequisites`, `k3s_node`, `cilium`,
+>   `alloy_collector`.
+> - **Supported systems:** Docker and collector hosts on Ubuntu 22.04 and
+>   24.04, Debian 12, Rocky Linux 9, and AlmaLinux 9; k3s nodes on Ubuntu
+>   only. The preflight stops the whole run, before any change, if one host
+>   is not on that list.
+> - **Pinned and verified artifacts:** Docker Engine from a repository whose
+>   signing key must match a pinned fingerprint; the k3s binary and the
+>   Alloy archive by SHA-256. A mismatch installs nothing. k3s is installed
+>   without running its upstream install script.
+> - **Secrets:** "idempotent secret generation" is done by the command-line
+>   tool, not by Ansible. A target host never talks to Vault; every secret
+>   reaches it as a copied file in a `no_log` task. The cluster join token
+>   is a declared secret, generated once by `generate-cluster-token` and
+>   never replaced. The external collector's client certificate is issued
+>   and renewed by `issue-certificate --if-needed`.
+> - **Firewall:** the allowlists are validated first, including that the
+>   playbook's own connection is covered. The change arms a timer that
+>   restores the previous rules unless a fresh connection succeeds. On
+>   Docker hosts the published entry point is also restricted in the
+>   `DOCKER-USER` chain, because Docker bypasses UFW and firewalld.
+> - **Cluster prerequisites:** kernel version and modules, storage
+>   packages, disks, MTU, address ranges, and the load-balancer pool are
+>   checked by `check-cluster-layout`. Of the cluster add-ons only Cilium is
+>   installed here; MetalLB, Longhorn, Traefik, and cert-manager are
+>   installed with the workloads in todo 6.
+> - **Docker deployment:** the Compose stack is deployed to a remote host as
+>   a production single node, not highly available. This was previously
+>   recorded as deferred.
+>
+> **Verified:** `ansible-lint` (production profile) and syntax checks are
+> clean; every role's scenario passes in systemd containers of each system
+> it supports, including a dry run and a second run that changes nothing;
+> the end-to-end suite publishes the external entry point locally and shows
+> that ingestion there needs a client certificate. **Not verified:** nothing
+> has run on a real host. Firewall enforcement, the automatic restore,
+> loading kernel settings, starting the Docker daemon or the stack through
+> the role, starting k3s, joining nodes, Cilium, and `arm64` were never
+> exercised.
+
 ### 6. Deliver Kubernetes and EKS workloads
 
 Add exact-version official Grafana chart values for self-hosted and AWS profiles, release orchestration, and the small supporting chart.
@@ -188,6 +291,15 @@ Provide a small tested MQTT-to-metrics bridge example for constrained devices pl
 
 Generate documented UFW/iptables rules, AWS SG/NACL examples, and Kubernetes policy expectations from the network contract, including stateful SG versus stateless NACL return traffic.
 
+> **Amendment:** Two parts of this todo already exist from todo 5. A
+> collector can be installed on a virtual machine or next to an external
+> service with the `alloy_collector` role, using credentials and
+> certificates from the same workflow; what remains is the remote-cluster
+> manifests and any registration beyond running the playbook. Host firewall
+> rules are generated from the contract and applied by the `firewall` role;
+> what remains is the documented, standalone rule examples and the AWS and
+> Kubernetes ones.
+
 ### 9. Add orchestration, CI, and acceptance coverage
 
 Implement `make deploy-docker`, `make deploy-self-hosted`, `make deploy-aws`, corresponding destroy targets, `make lint`, and `make test`, backed by shared scripts rather than duplicated shell logic.
@@ -200,6 +312,14 @@ Bootstrap missing local validation tools into the authorized isolated environmen
 
 Add Docker end-to-end tests, Kubernetes integration tests, and separately authorized self-hosted/AWS acceptance jobs. Lightweight cluster tests do not substitute for multi-node k3s/Longhorn or actual EKS/IRSA verification.
 
+> **Amendment:** None of this todo is started: there is no Makefile and no
+> CI workflow. What exists is run by hand: the Python unit suite, the
+> provider-mocked Terraform tests, `ansible-lint` and the role scenarios
+> (`ansible/molecule/run.sh`), the Compose configuration tests, and the
+> Docker end-to-end suite (19 cases). Deployment and teardown are
+> `quickstart-docker` and `teardown-docker` locally, and the playbooks for
+> other machines; both teardowns keep data unless a purge is confirmed.
+
 ### 10. Complete documentation and release evidence
 
 Finish README, `docs/00-quickstart.md`, and all ten numbered documents in the brief. Every guide has prerequisites, concrete commands, expected outcomes, troubleshooting, and rollback/teardown.
@@ -208,21 +328,28 @@ Explain maintenance, upgrades, certificate and secret rotation, Kafka recovery, 
 
 Verify commands against implemented targets. The Docker quickstart has an explicit prerequisites/download-speed/resource assumption and a measured cold/warm-start check against the brief's startup target; do not claim the target without measurement.
 
-> **Amendment: recorded deferrals.** A comparison of todos 1 to 4 with the
+> **Amendment: recorded deferrals.** A comparison of todos 1 to 5 with the
 > repository found items those todos name that are deliberately not built
-> yet. Each is owned by a later todo:
+> or not verified yet. Each is owned by a later todo:
 >
 > | Item | Named in | Owned by | Why later |
 > | --- | --- | --- | --- |
-> | Ansible collection pins, and verification of the OS matrix | todo 1 | todo 5 | Their first consumer, the Ansible automation, does not exist yet |
+> | Verification of the host automation on real machines | todo 5 | open | Todo 5 pinned the Ansible tooling and tested every role in containers of each supported system; no playbook has run on a real host. See `docs/08-ansible.md`, "Verification limits" |
 > | Chart lockfiles and Kubernetes image digests | todo 1 | todo 6 | There is no chart to lock until the workloads are added |
 > | IAM for the AWS load balancer controller | todo 2 | todo 6 | Its policy is published per controller release, and none is pinned yet |
-> | Firewall-format outputs such as UFW or iptables rules | conventions | todo 8 | Todo 8 already owns them; today only the port table and a JSON copy of the contract are generated |
+> | Standalone firewall-format outputs: documented UFW or iptables rule examples, AWS SG/NACL examples | conventions | todo 8 | Todo 8 owns them. Host rules are generated and applied by the Ansible `firewall` role; outside it only the port table and a JSON copy of the contract are generated |
+> | MetalLB, Longhorn, Traefik, and cert-manager on the k3s cluster | deployment profiles, todo 5 | todo 6 | Todo 5 checks their prerequisites; they are installed with the workloads that need them |
+> | An AWS example platform document | conventions | todo 6 | Nothing consumes one until the EKS workloads exist |
 > | Prerequisite checks beyond Vault and Terraform | todo 1 | todo 9 | They belong with the orchestration that needs the other tools |
 > | Modelled backups, and an expiry for old state-bucket versions | storage conventions | todo 10 | They belong with backup and restore |
 >
-> Already recorded elsewhere and unchanged: retention deletion tests, and
-> production single-node Docker Compose.
+> Already recorded elsewhere and unchanged: retention deletion tests.
+>
+> Done since this list was first recorded: the Ansible tooling pins and the
+> evidence behind each operating system entry (todo 5, in
+> `config/versions.yaml`), and production single-node Docker Compose, which
+> is the Docker host deployment in `docs/08-ansible.md`. What todo 5 could
+> not verify without a target machine is the first row above.
 
 ## Dependencies and execution order
 
@@ -236,6 +363,16 @@ Write architecture first and update documentation alongside each component, rath
 
 - All three environments render valid, internally consistent configurations with exact supported version pins and no committed plaintext secrets.
 - Terraform validates; authenticated plans are clean for supplied environment inputs. After deployment, a second plan is empty and a second Ansible run reports no unintended changes. Helm release inputs and generated files are deterministic.
+
+  > **Amendment, status after todo 5:** Terraform validates and its
+  > provider-mocked tests pass; no authenticated plan has been made. A second
+  > Ansible run changes nothing in every role's container test; that is not
+  > yet shown on a real host. The criteria below that concern the Docker
+  > profile (four signals, two customers with two datastreams each, spoofed
+  > headers, revoked certificates, redaction, restarts, credential rotation)
+  > are met by the end-to-end suite. Retention deletion, alerting, replica
+  > failure, backup and restore, and everything on Kubernetes or AWS are
+  > open.
 - Smoke fixtures ingest and query all four signals, survive collector/backend restarts as designed, and exercise Grafana correlations.
 - Two customer tenants with two datastreams each cannot ingest/query across unauthorized boundaries. Spoofed headers, bad/revoked certificates, and query attempts with write-only credentials fail.
 - Different retention values are selected correctly for every signal and pair. Backend-specific deletion tests use supported durations and verify deletion after documented processing windows; long-duration tests are distinct from fast CI.

@@ -1,0 +1,11 @@
+# Decides, per host, whether its system is supported for its role. Changes nothing and never fails.
+- name: Decide whether this host is supported for its role
+  ansible.builtin.set_fact:
+    preflight_supported: >-
+      {{ nighthawk.os_support[preflight_host_role]
+         | selectattr('distribution', 'equalto', preflight_reported_distribution)
+         | selectattr('architectures', 'contains', preflight_reported_architecture)
+         | map(attribute='versions') | flatten | intersect(preflight_reported_versions) | length > 0 }}
+    preflight_finding: >-
+      {{ inventory_hostname }}: {{ ansible_facts['distribution'] }} {{ preflight_reported_versions | first }}
+      on {{ preflight_reported_architecture }} is not supported as a {{ preflight_host_role }}

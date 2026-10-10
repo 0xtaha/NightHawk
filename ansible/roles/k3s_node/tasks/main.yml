@@ -1,0 +1,110 @@
+# Installs the binary and its configuration. It does not run the k3s project's install script.
+- name: Look for the join token on the control machine
+  ansible.builtin.stat:
+    path: "{{ k3s_join_token_file }}"
+    get_checksum: false
+  delegate_to: localhost
+  become: false
+  register: k3s_node_token
+
+- name: Refuse to continue without the join token
+  ansible.builtin.assert:
+    that: k3s_node_token.stat.exists
+    fail_msg: >-
+      {{ k3s_join_token_file }} not found on the control machine. Run `python -m nighthawk
+      generate-cluster-token` once and `python -m nighthawk materialize-secrets`, then point
+      k3s_join_token_file at the materialized file. {{ inventory_hostname }} was not changed.
+    quiet: true
+
+- name: Look for an installed k3s
+  ansible.builtin.stat:
+    path: "{{ k3s_node_binary }}"
+  register: k3s_node_present
+
+- name: Ask the installed k3s for its version
+  ansible.builtin.command:
+    cmd: "{{ k3s_node_binary }} --version"
+  register: k3s_node_running
+  changed_when: false
+  check_mode: false
+  when: k3s_node_present.stat.exists
+
+- name: Refuse to replace a different version
+  ansible.builtin.assert:
+    that: >-
+      not k3s_node_present.stat.exists
+      or ('v' ~ k3s_node_version ~ ' ') in k3s_node_running.stdout
+      or k3s_node_allow_version_change | bool
+    fail_msg: >-
+      {{ inventory_hostname }} runs {{ (k3s_node_running.stdout_lines | default(['an unknown k3s version'])) | first }},
+      but {{ k3s_node_version }} is pinned. Nothing was changed. Set k3s_node_allow_version_change to let
+      this role change the version.
+    quiet: true
+
+- name: Download the binary, keeping it only if its checksum matches the pin
+  block:
+    - name: Download and verify
+      ansible.builtin.get_url:
+        url: "{{ k3s_node_download_base }}/v{{ k3s_node_version | urlencode }}/{{ k3s_node_artifact }}"
+        dest: "{{ k3s_node_binary }}"
+        checksum: "sha256:{{ k3s_node_checksum }}"
+        owner: root
+        group: root
+        mode: "0755"
+      notify: Restart k3s
+      # A dry run does not fetch the binary only to discard it.
+      when: not ansible_check_mode
+  rescue:
+    - name: Fail, naming the artifact
+      ansible.builtin.fail:
+        msg: >-
+          {{ k3s_node_artifact }} {{ k3s_node_version }} was not installed on {{ inventory_hostname }}:
+          {{ ansible_failed_result.msg | default('the download or the checksum comparison failed') }}
+          The pinned SHA-256 is {{ k3s_node_checksum }}. Nothing was installed.
+
+- name: Create the configuration directory
+  ansible.builtin.file:
+    path: "{{ k3s_node_config_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Copy the join token, readable by root only
+  ansible.builtin.copy:
+    src: "{{ k3s_join_token_file }}"
+    dest: "{{ k3s_node_config_dir }}/join-token"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Write the configuration
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: "{{ k3s_node_config_dir }}/config.yaml"
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart k3s
+
+- name: Install the unit
+  ansible.builtin.template:
+    src: k3s.service.j2
+    dest: "/etc/systemd/system/{{ k3s_node_unit }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: k3s_node_unit_file
+  notify: Restart k3s
+
+- name: Start k3s and enable it at boot
+  ansible.builtin.systemd_service:
+    name: "{{ k3s_node_unit }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  when:
+    - k3s_node_manage_service | bool
+    # In a dry run on a new node the unit was not installed, so there is nothing to start.
+    - not (ansible_check_mode and k3s_node_unit_file is changed)

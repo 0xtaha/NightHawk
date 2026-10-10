@@ -1,0 +1,27 @@
+- name: Give the administering account a key, as a real host would have
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Create the key directory
+      ansible.builtin.file:
+        path: /root/.ssh
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Authorize a throwaway public key
+      ansible.builtin.copy:
+        content: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFh0ZXN0a2V5Zm9ybW9sZWN1bGVvbmx5bm90YXJlYWxrZXkx molecule\n"
+        dest: /root/.ssh/authorized_keys
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Start with a setting the role must override
+      ansible.builtin.copy:
+        content: "PasswordAuthentication yes\n"
+        dest: /etc/ssh/sshd_config.d/50-cloud-init.conf
+        owner: root
+        group: root
+        mode: "0600"

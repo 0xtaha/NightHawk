@@ -1,0 +1,25 @@
+# The version and the binary checksums come from the rendered inputs, never from this role.
+k3s_node_download_base: https://github.com/k3s-io/k3s/releases/download
+k3s_node_architecture: >-
+  {{ {'x86_64': 'amd64', 'aarch64': 'arm64'}.get(ansible_facts['architecture'], ansible_facts['architecture']) }}
+k3s_node_version: "{{ nighthawk.pins.k3s.version }}"
+k3s_node_checksum: "{{ nighthawk.pins.k3s.sha256['linux_' ~ k3s_node_architecture] }}"
+# The release names the amd64 binary `k3s` and every other one `k3s-<architecture>`.
+k3s_node_artifact: "{{ 'k3s' if k3s_node_architecture == 'amd64' else 'k3s-' ~ k3s_node_architecture }}"
+k3s_node_binary: /usr/local/bin/k3s
+k3s_node_config_dir: /etc/rancher/k3s
+
+# What this node is, from the inventory's groups.
+k3s_node_role: "{{ 'server' if inventory_hostname in (groups['k3s_servers'] | default([])) else 'agent' }}"
+k3s_node_first_server: "{{ groups['k3s_servers'] | first }}"
+k3s_node_is_first_server: "{{ inventory_hostname == k3s_node_first_server }}"
+# The address other nodes reach this one on.
+k3s_node_address: "{{ ansible_host | default(ansible_facts['default_ipv4']['address']) }}"
+k3s_node_server_url: >-
+  https://{{ hostvars[k3s_node_first_server]['ansible_host'] | default(k3s_node_first_server) }}:{{ nighthawk.cluster.api_port }}
+k3s_node_unit: "{{ 'k3s.service' if k3s_node_role == 'server' else 'k3s-agent.service' }}"
+
+# A node that runs a different version is an error. Set this to let the role change it.
+k3s_node_allow_version_change: false
+# Start k3s and enable it at boot. A test container cannot run it.
+k3s_node_manage_service: true

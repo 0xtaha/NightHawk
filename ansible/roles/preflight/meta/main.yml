@@ -1,0 +1,15 @@
+galaxy_info:
+  role_name: preflight
+  namespace: nighthawk
+  author: NightHawk
+  description: Refuse an unsupported operating system before any host is changed.
+  license: Proprietary
+  min_ansible_version: "2.21"
+  platforms:
+    - name: Ubuntu
+      versions: [jammy, noble]
+    - name: Debian
+      versions: [bookworm]
+    - name: EL
+      versions: ["9"]
+dependencies: []

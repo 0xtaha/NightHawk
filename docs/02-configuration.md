@@ -19,9 +19,12 @@ loading, and persistence have been observed on that stack under rootless
 Podman; retention deletion has not. Kubernetes deployment is not implemented. See
 [collection](04-collection.md), [gateway](05-gateway.md), and
 [tenant provisioning](06-tenant-provisioning.md).
-The network contract covers the gateway entry points and the flows behind the
-gateway, not a complete Kubernetes or host firewall. Do not deploy it as a
-complete allowlist.
+`render-docker-deployment`, `generate-cluster-token`, and
+`check-cluster-layout` serve the [host and cluster automation](08-ansible.md).
+The network contract covers the gateway entry points, the flows behind the
+gateway, SSH administration, and the node-to-node flows of a k3s cluster. The
+host firewall role opens exactly its inbound rules per host role. It is not
+a Kubernetes NetworkPolicy set; that belongs with the workloads.
 
 ## Prerequisites
 
@@ -173,6 +176,22 @@ The required `grafana` object has two fields:
 | `hostname` | DNS name of the Grafana UI. It must differ from the gateway hostname; the gateway serves both names on the same listeners and the gateway server certificate carries both |
 | `admin_secret_ref` | Secret holding the Grafana administrator password. It must not be reused for anything else |
 
+### Cluster block
+
+Only a `self-hosted-k8s` document may have a `cluster` object. Its one field,
+`join_token_secret_ref`, names the secret that holds the token k3s nodes join
+with. It must be a declared secret that nothing else uses.
+`config/self-hosted.example.yaml` is an example. Create the token once:
+
+```console
+$ python -m nighthawk generate-cluster-token --config config/self-hosted.example.yaml
+Generated the cluster join token in Vault at nighthawk/cluster key join-token
+```
+
+Run again, it says the token already exists and writes nothing: nodes hold
+the token, so it is never replaced. See
+[k3s cluster](08-ansible.md#k3s-cluster-self-hosted-profile).
+
 ### Storage identity secrets
 
 For local SeaweedFS storage, each binding's `identity.ref` names a secret whose
@@ -245,7 +264,9 @@ This produces `platform.json`, `network.json`, `ports.md`, one
 `<backend>-overrides.yaml` per signal backend, `unenforced-limits.json`,
 `gateway/` (Traefik configuration and route table),
 `grafana/desired-state.json`, `vault/` ([what the platform needs from
-Vault](#what-the-platform-needs-from-vault)), and, for a `docker` deployment, `backends/`
+Vault](#what-the-platform-needs-from-vault)), `ansible/nighthawk.yml` (the one
+variables file every playbook loads: firewall rules, version pins, checksums,
+kernel settings, and supported systems; see [Ansible](08-ansible.md)), and, for a `docker` deployment, `backends/`
 with each backend's own configuration ([Docker Compose](07-docker-compose.md)). `pyroscope-overrides.yaml` uses the approved Pyroscope 2.3.1 v2
 `retention_period` field, without a default retention or overrides for disabled
 profiling streams. A version/storage-mode/field change fails until its

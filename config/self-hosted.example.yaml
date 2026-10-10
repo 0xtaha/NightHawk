@@ -1,0 +1,126 @@
+# Contract example for the self-hosted Kubernetes profile, not deployment configuration.
+# Retention values are examples. The workloads this document configures are installed in phase 6;
+# phase 5 uses it for the cluster join token and the rendered Ansible inputs.
+schema_version: 2
+deployment: self-hosted-k8s
+profile: production
+vault:
+  # The operator's Vault. Credentials are never declared here.
+  address: https://vault.example.com:8200
+  kv_mount: nighthawk-kv
+  pki:
+    mount: nighthawk-pki
+    server_role: nighthawk-server
+    client_role: nighthawk-collector
+gateway:
+  hostname: gateway.nighthawk.internal
+  entry_points: [local-gateway, grafana-gateway]
+  grafana_entry_point: grafana-gateway
+  auth_service: http://authz:9180
+  upstreams:
+    grafana: http://grafana:3000
+    metrics: http://mimir:8080
+    logs: http://loki:3100
+    traces:
+      query: http://tempo:3200
+      otlp_grpc: h2c://tempo:4317
+      otlp_http: http://tempo:4318
+    profiles: http://pyroscope:4040
+  revoked_certificate_fingerprints: []
+grafana:
+  hostname: grafana.nighthawk.internal
+  admin_secret_ref: grafana-admin
+storage:
+  provider: seaweedfs
+  bindings:
+    mimir-blocks: &mimir-binding
+      protocol: s3
+      endpoint: https://seaweedfs:8333
+      region: local
+      bucket: nighthawk-mimir-blocks
+      force_path_style: true
+      tls:
+        enabled: true
+        trust: pki
+        ca_secret_ref: null
+      identity:
+        type: secret
+        ref: mimir-storage
+      capabilities:
+        versioning: false
+        lifecycle: false
+        workload_identity: false
+    mimir-ruler:
+      <<: *mimir-binding
+      bucket: nighthawk-mimir-ruler
+    mimir-alertmanager:
+      <<: *mimir-binding
+      bucket: nighthawk-mimir-alertmanager
+    loki-chunks:
+      <<: *mimir-binding
+      bucket: nighthawk-loki-chunks
+      identity:
+        type: secret
+        ref: loki-storage
+    tempo-traces:
+      <<: *mimir-binding
+      bucket: nighthawk-tempo-traces
+      identity:
+        type: secret
+        ref: tempo-storage
+    pyroscope-profiles:
+      <<: *mimir-binding
+      bucket: nighthawk-pyroscope-profiles
+      identity:
+        type: secret
+        ref: pyroscope-storage
+cluster:
+  # Generated once by `generate-cluster-token`; copied to nodes as a file by the k3s_node role.
+  join_token_secret_ref: cluster-join-token
+secrets:
+  cluster-join-token: {path: nighthawk/cluster, key: join-token}
+  mimir-storage: {path: nighthawk/self-hosted, key: mimir-storage}
+  loki-storage: {path: nighthawk/self-hosted, key: loki-storage}
+  tempo-storage: {path: nighthawk/self-hosted, key: tempo-storage}
+  pyroscope-storage: {path: nighthawk/self-hosted, key: pyroscope-storage}
+  grafana-admin: {path: nighthawk/self-hosted, key: grafana-admin}
+  example-ingest: {path: nighthawk/self-hosted, key: example-ingest}
+  example-query: {path: nighthawk/self-hosted, key: example-query}
+credentials:
+  - id: example-ingest
+    secret_ref: example-ingest
+    tenant: example
+    datastream: application
+    permission: ingest
+    certificate_identity: spiffe://nighthawk/example/application/collector
+  - id: example-query
+    secret_ref: example-query
+    tenant: example
+    datastream: application
+    permission: query
+tenants:
+  - id: example
+    datastreams:
+      - id: application
+        backend_id: example-application
+        signals:
+          metrics:
+            retention: 168h
+            ingestion_rate_samples_per_second: 10000
+            query_concurrency: 4
+          logs:
+            retention: 72h
+            ingestion_rate_bytes_per_second: 1048576
+            query_concurrency: 4
+          traces:
+            retention: 72h
+            ingestion_rate_bytes_per_second: 1048576
+            query_concurrency: 4
+          profiles:
+            retention: 168h
+            ingestion_rate_bytes_per_second: 1048576
+            query_concurrency: 4
+        collection:
+          approved: true
+          drop_fields: [password, authorization, cookie, email]
+          allow_privileged_profiling: false

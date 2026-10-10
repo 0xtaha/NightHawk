@@ -15,7 +15,8 @@ import yaml
 from nighthawk.config import (
     ConfigurationError, ROOT, check_pins, load_network, load_platform, load_versions, validate_migration,
 )
-from nighthawk import authz, backends, collector, fixtures, gateway, grafana, quickstart, tools, trust, vault
+from nighthawk import ansible_inputs, authz, backends, collector, fixtures, gateway, grafana, quickstart, tools, trust, vault
+from nighthawk.cluster_layout import layout_problems
 from nighthawk.overrides import render_overrides
 from nighthawk.secrets import (
     MATERIALIZED_SECRETS_DIR, cleanup, doctor, ensure_doctor_ok, materialize, rotate_secret, store_secret,
@@ -62,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
     render_parser = subparsers.add_parser("render-contracts")
     _add_contract_arguments(render_parser)
     render_parser.add_argument("--output", type=Path, required=True, help="New directory for non-secret contract artifacts")
+    render_parser.add_argument("--versions", type=Path, default=ROOT / "config" / "versions.yaml")
     render_parser.add_argument(
         "--credential", action="append", default=[],
         help="Query credential ID for a datastream that declares several; repeat per datastream",
@@ -114,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
 
     generate_credential_parser = subparsers.add_parser("generate-credential")
     generate_credential_parser.add_argument("--credential", required=True)
+    cluster_token_parser = subparsers.add_parser("generate-cluster-token", help="Create the cluster join token in Vault, once")
     storage_identity_parser = subparsers.add_parser("generate-storage-identity")
     storage_identity_parser.add_argument("--identity", required=True, help="Secret reference of a storage binding identity")
     issue_parser = subparsers.add_parser("issue-certificate")
@@ -123,11 +126,16 @@ def main(argv: list[str] | None = None) -> int:
     issue_target.add_argument("--storage", action="store_true", help="Issue the local object storage server certificate")
     issue_parser.add_argument("--valid-days", type=int, help="Required; there is no default validity")
     issue_parser.add_argument("--output-dir", type=Path, required=True)
+    issue_parser.add_argument(
+        "--if-needed", action="store_true",
+        help="Issue only when the pair is missing, expiring, or from another authority; replace it in place",
+    )
+    issue_parser.add_argument("--renew-before-days", type=int, help="With --if-needed: replace a certificate with fewer days left")
     revoke_parser = subparsers.add_parser("revoke-certificate", help="Revoke in Vault and print the fingerprint to list")
     revoke_parser.add_argument("--certificate", type=Path, required=True)
     for vault_parser in (
         doctor_parser, store_secret_parser, rotate_secret_parser, materialize_parser, bootstrap_parser,
-        generate_credential_parser, storage_identity_parser, issue_parser, revoke_parser,
+        generate_credential_parser, storage_identity_parser, cluster_token_parser, issue_parser, revoke_parser,
     ):
         vault_parser.add_argument("--config", type=Path, required=True)
         vault_parser.add_argument("--network", type=Path, default=ROOT / "config" / "network.yaml")
@@ -147,6 +155,13 @@ def main(argv: list[str] | None = None) -> int:
     grafana_parser.add_argument(
         "--credential", action="append", default=[],
         help="Query credential ID for a datastream that declares several; repeat per datastream",
+    )
+
+    layout_parser = subparsers.add_parser(
+        "check-cluster-layout", help="Judge a declared cluster layout and the facts its nodes report; changes nothing",
+    )
+    layout_parser.add_argument(
+        "--layout", required=True, help="JSON file written by the k3s_prerequisites role, or - for standard input",
     )
 
     fetch_parser = subparsers.add_parser("fetch-tools", help="Download the pinned Terraform, verified by checksum")
@@ -182,6 +197,22 @@ def main(argv: list[str] | None = None) -> int:
         help="Also collect host and container telemetry (privileged; Docker Engine only)",
     )
     _add_vault_arguments(quickstart_parser)
+    deployment_parser = subparsers.add_parser(
+        "render-docker-deployment",
+        help="Render the Compose stack for another machine: secrets from Vault, certificates, configuration",
+    )
+    deployment_parser.add_argument("--config", type=Path, required=True)
+    deployment_parser.add_argument("--output", type=Path, required=True, help="Local directory for the rendered/ and secrets/ trees")
+    deployment_parser.add_argument("--remote-dir", type=Path, required=True, help="Absolute directory on the host that will hold both trees")
+    deployment_parser.add_argument("--uid", type=int, required=True, help="UID of the account the stack runs as on the host")
+    deployment_parser.add_argument("--gid", type=int, required=True, help="GID of that account")
+    deployment_parser.add_argument("--external-bind-address", help="Host address the external entry point is published on")
+    deployment_parser.add_argument("--tenant", help="Tenant of the collector's datastream (default: the first)")
+    deployment_parser.add_argument("--datastream")
+    deployment_parser.add_argument("--certificate-valid-days", type=int, default=90)
+    deployment_parser.add_argument("--credential", action="append", default=[])
+    deployment_parser.add_argument("--host-collection", action="store_true", help="Also render the host and container collector")
+    _add_vault_arguments(deployment_parser)
     teardown_parser = subparsers.add_parser("teardown-docker")
     teardown_parser.add_argument("--purge", action="store_true", help="Also delete every volume, including stored telemetry")
     teardown_parser.add_argument("--yes", action="store_true", help="Confirm --purge without a prompt")
@@ -194,6 +225,20 @@ def main(argv: list[str] | None = None) -> int:
         stack_parser.add_argument("--timeout", type=int, default=600, help="Seconds to wait for the stack")
 
     args = parser.parse_args(argv)
+
+    if args.command == "render-docker-deployment":
+        try:
+            quickstart.render_deployment(quickstart.Options(
+                config=args.config, rendered_dir=args.output / "rendered", secrets_dir=args.output / "secrets",
+                remote_rendered_dir=args.remote_dir / "rendered", remote_secrets_dir=args.remote_dir / "secrets",
+                remote_run_as=(args.uid, args.gid), external_bind_address=args.external_bind_address,
+                tenant=args.tenant, datastream=args.datastream, certificate_valid_days=args.certificate_valid_days,
+                credentials=tuple(args.credential), host_collection=args.host_collection, vault_auth=_auth(args),
+            ))
+            return 0
+        except (ConfigurationError, OSError) as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
 
     if args.command in ("quickstart-docker", "teardown-docker"):
         compose = tuple(shlex.split(args.compose))
@@ -317,7 +362,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command in (
         "store-secret", "rotate-secret", "materialize-secrets", "generate-credential",
-        "generate-storage-identity", "issue-certificate", "revoke-certificate",
+        "generate-storage-identity", "generate-cluster-token", "issue-certificate", "revoke-certificate",
     ):
         try:
             platform = load_platform(args.config, network=args.network)
@@ -337,11 +382,28 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "generate-storage-identity":
                 reference = trust.generate_storage_identity(platform, args.identity, client)
                 print(f"Generated the storage keys for {args.identity} in Vault at {reference.path} key {reference.key}")
-            elif args.command == "issue-certificate":
-                issued = trust.issue_certificate(
-                    platform, args.output_dir, args.valid_days, client, credential_id=args.credential,
-                    server=args.server, storage=args.storage,
+            elif args.command == "generate-cluster-token":
+                reference, created = trust.generate_cluster_token(platform, client)
+                where = f"in Vault at {reference.path} key {reference.key}"
+                print(
+                    f"Generated the cluster join token {where}" if created
+                    else f"The cluster join token already exists {where}. Nothing was changed."
                 )
+            elif args.command == "issue-certificate":
+                what = {"credential_id": args.credential, "server": args.server, "storage": args.storage}
+                if args.if_needed:
+                    if args.renew_before_days is None:
+                        raise ConfigurationError("--if-needed requires --renew-before-days; there is no default")
+                    issued = trust.ensure_certificate(
+                        platform, args.output_dir, args.valid_days, client, args.renew_before_days, **what,
+                    )
+                    if issued is None:
+                        print(f"Nothing to do: the certificate in {args.output_dir} is current. Nothing was changed.")
+                        return 0
+                elif args.renew_before_days is not None:
+                    raise ConfigurationError("--renew-before-days only applies with --if-needed")
+                else:
+                    issued = trust.issue_certificate(platform, args.output_dir, args.valid_days, client, **what)
                 print(f"Issued {issued.certificate_path} with key {issued.key_path}")
                 print(f"SHA-256 fingerprint: {issued.fingerprint}")
             else:
@@ -352,6 +414,21 @@ def main(argv: list[str] | None = None) -> int:
         except (ConfigurationError, OSError) as error:
             print(f"error: {error}", file=sys.stderr)
             return 1
+
+    if args.command == "check-cluster-layout":
+        try:
+            layout = json.loads(sys.stdin.read() if args.layout == "-" else Path(args.layout).read_text(encoding="utf-8"))
+            problems = layout_problems(layout)
+        except (ConfigurationError, OSError, ValueError) as error:
+            print(f"error: {args.layout}: {error}", file=sys.stderr)
+            return 1
+        if problems:
+            print(f"The cluster layout cannot work: {len(problems)} problem(s). No host was changed.", file=sys.stderr)
+            for problem in problems:
+                print(f"  - {problem}", file=sys.stderr)
+            return 1
+        print(f"The cluster layout can work: {len(layout['nodes'])} node(s), shape {layout['shape']}.")
+        return 0
 
     if args.command == "check-pins":
         try:
@@ -398,6 +475,7 @@ def main(argv: list[str] | None = None) -> int:
             }
             artifacts.update(gateway.render_artifacts(platform, rules))
             artifacts.update(vault.access_requirements(platform))
+            artifacts.update(ansible_inputs.render_ansible_inputs(platform, rules, load_versions(args.versions)))
             backend_documents = backends.render_backends(platform)
             for backend, document in (backend_documents or {}).items():
                 artifacts[f"backends/{backend}.yaml"] = document

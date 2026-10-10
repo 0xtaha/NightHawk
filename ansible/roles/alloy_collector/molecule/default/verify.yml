@@ -1,0 +1,175 @@
+- name: The collector runs as its own account, confined, with its configuration loaded
+  hosts: all
+  gather_facts: false
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  tasks:
+    - name: Ask systemd about the unit
+      ansible.builtin.systemd_service:
+        name: nighthawk-alloy.service
+      register: alloy_collector_test_unit
+
+    - name: It is running, enabled, and confined
+      ansible.builtin.assert:
+        that:
+          - alloy_collector_test_unit.status.ActiveState == 'active'
+          - alloy_collector_test_unit.status.UnitFileState == 'enabled'
+          - alloy_collector_test_unit.status.User == 'alloy'
+          - alloy_collector_test_unit.status.NoNewPrivileges == 'yes'
+          - alloy_collector_test_unit.status.ProtectSystem == 'strict'
+          - alloy_collector_test_unit.status.ProtectHome == 'yes'
+          - alloy_collector_test_unit.status.ReadWritePaths == '/var/lib/nighthawk-alloy'
+
+    - name: Ask which account the process runs as
+      ansible.builtin.command:
+        cmd: ps -o user= -p {{ alloy_collector_test_unit.status.MainPID }}
+      register: alloy_collector_test_process
+      changed_when: false
+
+    - name: Ask the collector whether its configuration is loaded
+      ansible.builtin.uri:
+        url: http://127.0.0.1:12345/-/ready
+        return_content: true
+      register: alloy_collector_test_ready
+      retries: 10
+      delay: 3
+      until: alloy_collector_test_ready.status == 200
+
+    - name: Ask the binary for its version
+      ansible.builtin.command:
+        cmd: /usr/local/bin/nighthawk-alloy --version
+      register: alloy_collector_test_version
+      changed_when: false
+
+    - name: Read the collector's files
+      ansible.builtin.stat:
+        path: "/etc/nighthawk-alloy/{{ item }}"
+      loop:
+        - secrets
+        - secrets/credential
+        - secrets/client.key.pem
+        - secrets/client.crt.pem
+        - active/datastream.alloy
+        - candidate
+      register: alloy_collector_test_files
+
+    - name: The pinned version runs as alloy, and the secrets exclude group and others
+      ansible.builtin.assert:
+        that:
+          - alloy_collector_test_process.stdout | trim == 'alloy'
+          - "'v' ~ nighthawk.pins.alloy.version in alloy_collector_test_version.stdout"
+          - alloy_collector_test_files.results[0].stat.mode == '0700'
+          - alloy_collector_test_files.results[1].stat.mode == '0600'
+          - alloy_collector_test_files.results[2].stat.mode == '0600'
+          - alloy_collector_test_files.results[3].stat.mode == '0600'
+          - alloy_collector_test_files.results[1].stat.pw_name == 'alloy'
+          - alloy_collector_test_files.results[4].stat.exists
+          - not alloy_collector_test_files.results[5].stat.exists
+
+- name: A configuration the collector refuses does not replace the running one
+  hosts: all
+  gather_facts: true
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  vars:
+    alloy_collector_test_root: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/collector"
+    alloy_collector_rendered_dir: "{{ alloy_collector_test_root }}/broken"
+    alloy_collector_credential_file: "{{ alloy_collector_test_root }}/credential"
+    alloy_collector_gateway_ca_file: "{{ alloy_collector_test_root }}/gateway-ca.pem"
+    alloy_collector_certificate_dir: "{{ alloy_collector_test_root }}/certificates"
+    alloy_collector_credential_id: example-ingest
+    alloy_collector_issue_certificate: false
+  tasks:
+    - name: Read the configuration in place before
+      ansible.builtin.stat:
+        path: /etc/nighthawk-alloy/active/datastream.alloy
+      register: alloy_collector_test_before
+
+    - name: Apply the broken configuration and expect a refusal
+      block:
+        - name: Run the role
+          ansible.builtin.include_role:
+            name: alloy_collector
+
+        - name: This must not be reached
+          ansible.builtin.fail:
+            msg: A configuration the collector refuses was put in place.
+      rescue:
+        - name: It said the running configuration was kept
+          ansible.builtin.assert:
+            that: "'the running configuration on ' ~ inventory_hostname ~ ' was kept' in ansible_failed_result.msg"
+
+    - name: Read the configuration in place afterwards
+      ansible.builtin.stat:
+        path: /etc/nighthawk-alloy/active/datastream.alloy
+      register: alloy_collector_test_after
+
+    - name: Ask systemd whether the collector is still running
+      ansible.builtin.systemd_service:
+        name: nighthawk-alloy.service
+      register: alloy_collector_test_active
+
+    - name: The same configuration is in place and the collector still runs
+      ansible.builtin.assert:
+        that:
+          - alloy_collector_test_after.stat.checksum == alloy_collector_test_before.stat.checksum
+          - alloy_collector_test_active.status.ActiveState == 'active'
+
+- name: An archive with another checksum installs nothing
+  hosts: all
+  gather_facts: true
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  vars:
+    alloy_collector_checksum: "0000000000000000000000000000000000000000000000000000000000000000"
+    alloy_collector_install_dir: /opt/refused-alloy
+    alloy_collector_binary: /usr/local/bin/refused-alloy
+    # A small stand-in for the archive: what matters is that its checksum is not the pinned one.
+    alloy_collector_download_base: file:///tmp/refused-download
+  tasks:
+    - name: Create the stand-in download location
+      ansible.builtin.file:
+        path: "/tmp/refused-download/v{{ nighthawk.pins.alloy.version }}"
+        state: directory
+        mode: "0755"
+
+    - name: Write the stand-in archive
+      ansible.builtin.copy:
+        content: "not the pinned archive\n"
+        dest: "/tmp/refused-download/v{{ nighthawk.pins.alloy.version }}/alloy-linux-{{ item }}.zip"
+        mode: "0644"
+      loop: [amd64, arm64]
+
+    - name: Install with a checksum the archive does not have
+      block:
+        - name: Run the installation
+          ansible.builtin.include_role:
+            name: alloy_collector
+            tasks_from: install
+
+        - name: This must not be reached
+          ansible.builtin.fail:
+            msg: An archive with another checksum was installed.
+      rescue:
+        - name: It named the artifact and installed nothing
+          ansible.builtin.assert:
+            that:
+              - "'alloy-linux-' in ansible_failed_result.msg"
+              - "'Nothing was installed' in ansible_failed_result.msg"
+
+    - name: Look for anything it left
+      ansible.builtin.find:
+        paths: /opt/refused-alloy
+        recurse: true
+      register: alloy_collector_test_left
+
+    - name: Look for the binary link
+      ansible.builtin.stat:
+        path: /usr/local/bin/refused-alloy
+      register: alloy_collector_test_link
+
+    - name: Nothing is there
+      ansible.builtin.assert:
+        that:
+          - alloy_collector_test_left.matched == 0
+          - not alloy_collector_test_link.stat.exists

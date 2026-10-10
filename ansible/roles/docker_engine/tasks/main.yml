@@ -1,0 +1,96 @@
+# The version and the key fingerprints come from the rendered inputs, never from this role.
+- name: Take the pins for this distribution family
+  ansible.builtin.set_fact:
+    docker_engine_family: "{{ 'rpm' if ansible_facts['os_family'] == 'RedHat' else 'apt' }}"
+    docker_engine_version: "{{ nighthawk.pins.docker_engine.version }}"
+    docker_engine_compose_version: "{{ nighthawk.pins.docker_engine.compose_plugin_version }}"
+
+- name: Take the fingerprint the repository key must have
+  ansible.builtin.set_fact:
+    docker_engine_fingerprint: "{{ nighthawk.pins.docker_engine.signing_key_fingerprints[docker_engine_family] }}"
+
+- name: Read installed packages
+  ansible.builtin.package_facts:
+    manager: auto
+
+- name: Refuse to replace a different installed version
+  ansible.builtin.assert:
+    that: >-
+      'docker-ce' not in ansible_facts['packages']
+      or docker_engine_version in (ansible_facts['packages']['docker-ce'] | map(attribute='version') | join(' '))
+      or docker_engine_allow_version_change | bool
+    fail_msg: >-
+      Docker Engine {{ (ansible_facts['packages']['docker-ce'] | default([{'version': 'unknown'}]) | first).version }}
+      is installed on {{ inventory_hostname }}, but {{ docker_engine_version }} is pinned. Nothing was changed.
+      Set docker_engine_allow_version_change to let this role change the version.
+    quiet: true
+
+- name: Refresh the package index (Debian family)
+  # The one step that also runs in check mode: without an index no package can be looked up.
+  ansible.builtin.apt:
+    update_cache: true
+    # Skipped while the index is younger than a day; a host without one always gets it.
+    cache_valid_time: 86400
+  when: docker_engine_family == 'apt'
+  check_mode: false
+  changed_when: false
+
+- name: Install what verifying a signing key needs
+  ansible.builtin.package:
+    name: "{{ ['gnupg', 'ca-certificates'] if docker_engine_family == 'apt' else ['gnupg2', 'ca-certificates'] }}"
+    state: present
+
+- name: Create the directory for the downloaded key
+  ansible.builtin.file:
+    path: "{{ docker_engine_key_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  register: docker_engine_key_dir
+
+- name: Download the repository signing key
+  ansible.builtin.get_url:
+    url: "{{ docker_engine_repository_base }}/{{ docker_engine_repository_distribution }}/gpg"
+    dest: "{{ docker_engine_key_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: docker_engine_key
+  # In a dry run on a new host there is no directory to download into yet.
+  when: not (ansible_check_mode and docker_engine_key_dir is changed)
+
+# Everything below trusts the key, so it is compared with the pinned fingerprint first. This
+# also runs in check mode once the key exists; it only reads.
+- name: Read the fingerprint of the downloaded key
+  ansible.builtin.command:
+    cmd: gpg --show-keys --with-colons {{ docker_engine_key_path }}
+  register: docker_engine_key_listing
+  changed_when: false
+  check_mode: false
+  when: docker_engine_key is not skipped and (not ansible_check_mode or docker_engine_key is not changed)
+
+- name: Refuse a key that is not the pinned one
+  ansible.builtin.assert:
+    that: >-
+      docker_engine_fingerprint in
+      (docker_engine_key_listing.stdout_lines | select('match', '^fpr:') | map('split', ':') | map(attribute=9) | list)
+    fail_msg: >-
+      The key at {{ docker_engine_repository_base }}/{{ docker_engine_repository_distribution }}/gpg does not have
+      the pinned fingerprint {{ docker_engine_fingerprint }}. Nothing was installed from that repository.
+    quiet: true
+  when: docker_engine_key_listing is not skipped
+
+- name: Configure the repository and install the pinned version
+  ansible.builtin.include_tasks: "{{ docker_engine_family }}.yml"
+  when: docker_engine_key_listing is not skipped
+
+- name: Start the daemon and enable it at boot
+  ansible.builtin.service:
+    name: docker
+    enabled: true
+    state: started
+  when:
+    - docker_engine_manage_service | bool
+    # In a dry run on a new host nothing was installed, so there is no daemon to start.
+    - not (ansible_check_mode and 'docker-ce' not in ansible_facts['packages'])

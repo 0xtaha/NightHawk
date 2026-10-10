@@ -1,0 +1,45 @@
+- name: A layout that cannot work stops every node before anything is changed
+  hosts: all
+  gather_facts: true
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  vars:
+    k3s_prerequisites_python: "{{ lookup('ansible.builtin.env', 'NIGHTHAWK_PYTHON') }}"
+    k3s_prerequisites_repository_dir: "{{ lookup('ansible.builtin.env', 'NIGHTHAWK_REPOSITORY_DIR') }}"
+    # Two nodes declared as the single-node shape, a pool outside the node network, and a
+    # storage disk that does not exist.
+    k3s_cluster_shape: development
+    k3s_node_network: 192.0.2.0/24
+    k3s_pod_cidr: 10.42.0.0/16
+    k3s_service_cidr: 10.43.0.0/16
+    k3s_node_mtu: 1500
+    k3s_load_balancer_pool: [198.51.100.10-198.51.100.20]
+    k3s_storage_disks: [/dev/nighthawk-no-such-disk]
+  tasks:
+    - name: Check the layout and expect a refusal
+      block:
+        - name: Run the role
+          ansible.builtin.include_role:
+            name: k3s_prerequisites
+
+        - name: This must not be reached
+          ansible.builtin.fail:
+            msg: An impossible layout was accepted.
+      rescue:
+        - name: Every problem is reported, by node, and nothing was changed
+          ansible.builtin.assert:
+            that:
+              - "'No host was changed' in ansible_failed_result.msg"
+              - "'the development shape is exactly one node, but 2 are declared' in ansible_failed_result.msg"
+              - "'is not inside the node network 192.0.2.0/24' in ansible_failed_result.msg"
+              - "'nh-ubuntu-2204: storage disk /dev/nighthawk-no-such-disk does not exist' in ansible_failed_result.msg"
+              - "'nh-ubuntu-2404: storage disk /dev/nighthawk-no-such-disk does not exist' in ansible_failed_result.msg"
+
+    - name: What each node reported is well formed
+      ansible.builtin.assert:
+        that:
+          - k3s_prerequisites_node.role == ('server' if inventory_hostname in groups['k3s_servers'] else 'agent')
+          - k3s_prerequisites_node.mtu | int > 0
+          - k3s_prerequisites_node.kernel | length > 0
+          - k3s_prerequisites_node.modules is iterable
+          - k3s_prerequisites_node.block_devices == {}

@@ -1,0 +1,21 @@
+#!/bin/sh
+# Managed by the NightHawk firewall role. Saves and restores the firewall state around a change.
+set -eu
+state="{{ firewall_state_dir }}/previous"
+case "${1:-}" in
+--save)
+    rm -rf "$state" && mkdir -p "$state"
+    if systemctl is-active --quiet firewalld.service; then echo active > "$state/.was"; else echo inactive > "$state/.was"; fi
+    ;;
+--restore)
+    [ -f "$state/.was" ] || exit 0
+    was="$(cat "$state/.was")"
+    rm -f "$state/.was"
+    # The change touched only the running configuration, so the permanent one is the previous state.
+    if [ "$was" = active ]; then firewall-cmd --reload; else systemctl stop firewalld.service; fi
+    ;;
+*)
+    echo "usage: $0 --save | --restore" >&2
+    exit 2
+    ;;
+esac

@@ -1,0 +1,18 @@
+# Copies a deployment rendered on the control machine and starts it. The host never reads
+# Vault: every secret arrives as a file, and nothing here is rendered on the host.
+- name: Read what was rendered for this host
+  ansible.builtin.include_tasks: inputs.yml
+
+- name: Create the account and the directories
+  ansible.builtin.include_tasks: account.yml
+
+- name: Copy the rendered configuration, the secrets, and the image source
+  ansible.builtin.include_tasks: files.yml
+
+- name: Build the image and start the stack
+  ansible.builtin.include_tasks: start.yml
+  when: nighthawk_stack_start | bool
+
+- name: State what this installation is
+  ansible.builtin.debug:
+    msg: "{{ nighthawk_stack_manifest.notice }}"

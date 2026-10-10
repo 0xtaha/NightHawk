@@ -1,0 +1,17 @@
+# Run a collector as a host service on machines outside the platform. See docs/08-ansible.md.
+- name: Check every collector host before changing any
+  hosts: collector_hosts
+  gather_facts: true
+  any_errors_fatal: true
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  roles:
+    - role: preflight
+
+- name: Install and configure the collector
+  hosts: collector_hosts
+  gather_facts: true
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  roles:
+    - role: alloy_collector

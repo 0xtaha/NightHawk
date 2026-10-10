@@ -1,0 +1,30 @@
+# Managed by the NightHawk alloy_collector role.
+[Unit]
+Description=NightHawk collector (Grafana Alloy {{ alloy_collector_version }})
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User={{ alloy_collector_user }}
+Group={{ alloy_collector_user }}
+EnvironmentFile={{ alloy_collector_config_dir }}/environment
+ExecStart={{ alloy_collector_binary }} run --storage.path={{ alloy_collector_state_dir }} --server.http.listen-addr={{ alloy_collector_listen_address }} {{ alloy_collector_config_dir }}/active
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+# The service cannot gain privileges, writes only to its state directory, and does not see
+# other users' home directories.
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths={{ alloy_collector_state_dir }}
+{% for line in alloy_collector_unit_extra_lines %}
+{{ line }}
+{% endfor %}
+
+[Install]
+WantedBy=multi-user.target

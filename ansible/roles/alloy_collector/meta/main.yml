@@ -1,0 +1,15 @@
+galaxy_info:
+  role_name: alloy_collector
+  namespace: nighthawk
+  author: NightHawk
+  description: Runs Grafana Alloy as a confined systemd service delivering to the NightHawk gateway.
+  license: Proprietary
+  min_ansible_version: "2.21"
+  platforms:
+    - name: Ubuntu
+      versions: [jammy, noble]
+    - name: Debian
+      versions: [bookworm]
+    - name: EL
+      versions: ["9"]
+dependencies: []

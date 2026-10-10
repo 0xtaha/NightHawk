@@ -1,0 +1,5 @@
+# Uses every platform from ansible/molecule/base.yml. A rootless container cannot load packet
+# filter rules, so this scenario checks what the role decides and writes, with activation off.
+# Enforcement and the automatic restore are not observable here.
+scenario:
+  name: default

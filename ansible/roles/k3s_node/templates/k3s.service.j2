@@ -1,0 +1,25 @@
+# Managed by the NightHawk k3s_node role. The same unit the k3s project ships, without its
+# install script.
+[Unit]
+Description=Lightweight Kubernetes ({{ k3s_node_role }}, k3s {{ k3s_node_version }})
+Documentation=https://k3s.io
+Wants=network-online.target
+After=network-online.target
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+Type=notify
+KillMode=process
+Delegate=yes
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+TimeoutStartSec=0
+Restart=always
+RestartSec=5s
+ExecStartPre=-/sbin/modprobe br_netfilter
+ExecStartPre=-/sbin/modprobe overlay
+ExecStart={{ k3s_node_binary }} {{ k3s_node_role }}

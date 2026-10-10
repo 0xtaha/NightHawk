@@ -15,7 +15,8 @@ from nighthawk.authz import RequestFacts, certificate_fingerprint, certificate_f
 from nighthawk.config import ConfigurationError, load_platform
 from nighthawk.gateway import policy_bundle
 from nighthawk.trust import (
-    authority_certificate, generate_credential, generate_storage_identity, issue_certificate, revoke_certificate,
+    authority_certificate, ensure_certificate, generate_cluster_token, generate_credential, generate_storage_identity, issue_certificate,
+    revoke_certificate,
 )
 from nighthawk.vault import pki_roles
 from tests.fakes import (
@@ -106,6 +107,71 @@ class StorageIdentityTests(TrustFixture):
         value = json.loads(self.stored()["tempo-storage"])
         self.assertNotIn(value["access_key"], output)
         self.assertNotIn(value["secret_key"], output)
+
+
+class ClusterTokenTests(TrustFixture):
+    def setUp(self) -> None:
+        super().setUp()
+        self.data["deployment"] = "self-hosted-k8s"
+        self.data["cluster"] = {"join_token_secret_ref": "cluster-join-token"}
+        self.data["secrets"]["cluster-join-token"] = {"path": "nighthawk/cluster", "key": "join-token"}
+        self.fake = None
+        self.load()
+
+    def writes(self) -> int:
+        return sum(1 for method, path, _ in self.fake.calls if method in ("POST", "PUT") and "/data/" in path)
+
+    def test_token_is_generated_once_and_never_replaced(self) -> None:
+        reference, created = generate_cluster_token(self.platform, self.client)
+        self.assertTrue(created)
+        self.assertEqual((reference.path, reference.key), ("nighthawk/cluster", "join-token"))
+        token = self.fake.values("nighthawk/cluster")["join-token"]
+        self.assertRegex(token, "^[0-9a-f]{64}$")
+        writes = self.writes()
+        self.assertEqual(writes, 1)
+        self.assertEqual(generate_cluster_token(self.platform, self.client), (reference, False))
+        self.assertEqual(self.writes(), writes)
+        self.assertEqual(self.fake.values("nighthawk/cluster")["join-token"], token)
+
+    def test_command_line_never_prints_the_token(self) -> None:
+        status, output, errors = self.cli("generate-cluster-token")
+        self.assertEqual((status, errors), (0, ""))
+        self.assertIn("Generated the cluster join token in Vault at nighthawk/cluster key join-token", output)
+        token = self.fake.values("nighthawk/cluster")["join-token"]
+        status, again, errors = self.cli("generate-cluster-token")
+        self.assertEqual((status, errors), (0, ""))
+        self.assertIn("already exists", again)
+        self.assertIn("Nothing was changed", again)
+        self.assertNotIn(token, output + again)
+        self.assertNotIn(token, self.fake.sent().replace(json.dumps(token), ""))
+
+    def test_document_without_a_cluster_has_no_token_to_generate(self) -> None:
+        del self.data["cluster"]
+        self.load()
+        with self.assertRaisesRegex(ConfigurationError, "declares no cluster.join_token_secret_ref"):
+            generate_cluster_token(self.platform, self.client)
+        self.assertEqual(self.writes(), 0)
+
+    def test_reference_is_valid_only_for_a_self_hosted_cluster_and_its_own_secret(self) -> None:
+        for deployment in ("docker",):
+            self.data["deployment"] = deployment
+            with self.assertRaisesRegex(ConfigurationError, "only a self-hosted-k8s deployment has a cluster join token"):
+                self.load()
+        self.data["deployment"] = "self-hosted-k8s"
+        self.data["cluster"]["join_token_secret_ref"] = "missing"
+        with self.assertRaisesRegex(ConfigurationError, "cluster: unknown secret reference 'missing'"):
+            self.load()
+        self.data["cluster"]["join_token_secret_ref"] = "grafana-admin"
+        with self.assertRaisesRegex(ConfigurationError, "join_token_secret_ref must not reuse another secret"):
+            self.load()
+        self.data["cluster"] = {"join_token_secret_ref": "cluster-join-token", "extra": 1}
+        with self.assertRaises(ConfigurationError):
+            self.load()
+
+    def test_self_hosted_example_document_is_valid_and_declares_the_token(self) -> None:
+        platform = load_platform(Path(__file__).resolve().parents[1] / "config" / "self-hosted.example.yaml")
+        self.assertEqual(platform.deployment, "self-hosted-k8s")
+        self.assertEqual(platform.cluster_join_token_secret_ref, "cluster-join-token")
 
 
 class IssueCertificateTests(TrustFixture):
@@ -253,6 +319,109 @@ class IssueCertificateTests(TrustFixture):
         status, _, errors = self.cli("issue-certificate", "--server", "--output-dir", str(self.output))
         self.assertEqual(status, 1)
         self.assertIn("explicit validity period is required", errors)
+
+
+class IssueIfNeededTests(TrustFixture):
+    """Issuing only when the pair is missing, expiring, or from an authority Vault no longer has."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.output = self.root / "issued"
+        self.certificate, self.key = self.output / "example-ingest.crt.pem", self.output / "example-ingest.key.pem"
+
+    def ensure(self, valid_days: int = 30, renew_before_days: int | None = 7, **what):
+        what = what or {"credential_id": "example-ingest"}
+        return ensure_certificate(self.platform, self.output, valid_days, self.client, renew_before_days, **what)
+
+    def signed(self) -> int:
+        return sum(1 for _, path, _ in self.fake.calls if "/sign/" in path)
+
+    def pair(self) -> tuple[bytes, bytes]:
+        return self.certificate.read_bytes(), self.key.read_bytes()
+
+    def test_missing_pair_is_issued_and_a_current_one_is_left_alone(self) -> None:
+        issued = self.ensure()
+        self.assertEqual((issued.certificate_path, issued.key_path), (self.certificate, self.key))
+        self.assertEqual(self.key.stat().st_mode & 0o777, 0o600)
+        before = self.pair(), self.certificate.stat().st_mtime_ns, self.key.stat().st_mtime_ns
+        self.assertIsNone(self.ensure())
+        self.assertEqual(self.signed(), 1)
+        self.assertEqual((self.pair(), self.certificate.stat().st_mtime_ns, self.key.stat().st_mtime_ns), before)
+        self.assertEqual(sorted(path.name for path in self.output.iterdir()), [self.certificate.name, self.key.name])
+
+    def test_certificate_close_to_expiry_is_replaced_with_the_same_identity(self) -> None:
+        self.ensure(valid_days=5, renew_before_days=1)
+        old = self.pair()
+        issued = self.ensure(valid_days=30, renew_before_days=7)
+        self.assertIsNotNone(issued)
+        self.assertEqual(self.signed(), 2)
+        self.assertNotEqual(self.pair()[0], old[0])
+        self.assertNotEqual(self.pair()[1], old[1])
+        certificate = x509.load_pem_x509_certificate(self.certificate.read_bytes())
+        names = certificate.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+        identity = next(item for item in self.platform.credentials if item.id == "example-ingest").certificate_identity
+        self.assertEqual([name.value for name in names], [identity])
+        self.assertGreater(certificate.not_valid_after_utc - datetime.datetime.now(datetime.timezone.utc), datetime.timedelta(days=29))
+        # Nothing of the staged replacement is left beside the pair.
+        self.assertEqual(sorted(path.name for path in self.output.iterdir()), [self.certificate.name, self.key.name])
+
+    def test_certificate_from_a_replaced_authority_is_issued_again(self) -> None:
+        self.ensure()
+        old = self.pair()
+        self.fake.new_authority()
+        self.assertIsNotNone(self.ensure())
+        self.assertNotEqual(self.pair(), old)
+        authority = x509.load_pem_x509_certificate(self.fake.ca_pem().encode("ascii"))
+        x509.load_pem_x509_certificate(self.certificate.read_bytes()).verify_directly_issued_by(authority)
+
+    def test_certificate_without_its_key_is_issued_again(self) -> None:
+        self.ensure()
+        self.key.unlink()
+        self.assertIsNotNone(self.ensure())
+        self.assertTrue(self.key.is_file())
+
+    def test_failed_replacement_leaves_the_old_pair_in_place(self) -> None:
+        self.ensure(valid_days=5, renew_before_days=1)
+        old = self.pair()
+        failures = {
+            "differs from the request": lambda: setattr(self.fake, "tamper", {"extra_names": [x509.DNSName("extra.example.com")]}),
+            "not allowed by this role": lambda: self.fake.roles[self.platform.vault.client_role].update(allowed_uri_sans=["spiffe://other/identity"]),
+        }
+        for expected, arrange in failures.items():
+            with self.subTest(expected=expected):
+                arrange()
+                with self.assertRaisesRegex(ConfigurationError, expected):
+                    self.ensure(valid_days=30, renew_before_days=7)
+                self.assertEqual(self.pair(), old)
+                self.assertEqual(sorted(path.name for path in self.output.iterdir()), [self.certificate.name, self.key.name])
+                self.fake.tamper = {}
+
+    def test_period_must_be_stated_and_shorter_than_the_validity(self) -> None:
+        with self.assertRaisesRegex(ConfigurationError, "renewal period of zero or more days is required"):
+            self.ensure(renew_before_days=None)
+        with self.assertRaisesRegex(ConfigurationError, "every run would issue a new certificate"):
+            self.ensure(valid_days=7, renew_before_days=7)
+        with self.assertRaisesRegex(ConfigurationError, "explicit validity period is required"):
+            self.ensure(valid_days=None)
+        self.assertEqual(self.signed(), 0)
+        self.assertFalse(self.output.exists())
+
+    def test_command_line_says_when_nothing_was_changed(self) -> None:
+        arguments = ("issue-certificate", "--credential", "example-ingest", "--valid-days", "30", "--output-dir", str(self.output))
+        status, output, errors = self.cli(*arguments, "--if-needed", "--renew-before-days", "7")
+        self.assertEqual((status, errors), (0, ""))
+        self.assertIn("Issued ", output)
+        status, output, errors = self.cli(*arguments, "--if-needed", "--renew-before-days", "7")
+        self.assertEqual((status, errors), (0, ""))
+        self.assertIn("Nothing to do", output)
+        self.assertIn("Nothing was changed", output)
+        self.assertEqual(self.signed(), 1)
+        status, _, errors = self.cli(*arguments, "--if-needed")
+        self.assertEqual(status, 1)
+        self.assertIn("--if-needed requires --renew-before-days", errors)
+        status, _, errors = self.cli(*arguments, "--renew-before-days", "7")
+        self.assertEqual(status, 1)
+        self.assertIn("only applies with --if-needed", errors)
 
 
 class RotationAndRevocationTests(TrustFixture):

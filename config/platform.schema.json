@@ -40,6 +40,14 @@
       }
     },
     "storage": {"$ref": "#/$defs/storage"},
+    "cluster": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["join_token_secret_ref"],
+      "properties": {
+        "join_token_secret_ref": {"$ref": "#/$defs/id"}
+      }
+    },
     "secrets": {
       "type": "object",
       "minProperties": 1,

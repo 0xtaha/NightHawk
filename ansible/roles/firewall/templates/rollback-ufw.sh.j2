@@ -1,0 +1,22 @@
+#!/bin/sh
+# Managed by the NightHawk firewall role. Saves and restores the firewall state around a change.
+set -eu
+state="{{ firewall_state_dir }}/previous"
+case "${1:-}" in
+--save)
+    rm -rf "$state" && mkdir -p "$state"
+    cp -a /etc/ufw/. "$state/"
+    if ufw status | grep -q '^Status: active'; then echo active > "$state/.was"; else echo inactive > "$state/.was"; fi
+    ;;
+--restore)
+    [ -f "$state/.was" ] || exit 0
+    was="$(cat "$state/.was")"
+    rm -f "$state/.was"
+    cp -a "$state/." /etc/ufw/
+    if [ "$was" = active ]; then ufw --force enable && ufw reload; else ufw --force disable; fi
+    ;;
+*)
+    echo "usage: $0 --save | --restore" >&2
+    exit 2
+    ;;
+esac

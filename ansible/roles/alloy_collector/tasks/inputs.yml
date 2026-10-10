@@ -1,0 +1,58 @@
+- name: Issue the client certificate if it is missing, expiring, or from a replaced authority
+  ansible.builtin.command:
+    argv:
+      - "{{ alloy_collector_python }}"
+      - -m
+      - nighthawk
+      - issue-certificate
+      - --config={{ alloy_collector_platform_config }}
+      - --credential={{ alloy_collector_credential_id }}
+      - --valid-days={{ alloy_collector_certificate_valid_days }}
+      - --if-needed
+      - --renew-before-days={{ alloy_collector_renew_before_days }}
+      - --output-dir={{ alloy_collector_certificate_dir }}
+    chdir: "{{ alloy_collector_repository_dir }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: alloy_collector_issued
+  changed_when: "'Issued ' in alloy_collector_issued.stdout"
+  # The command fails, before this host is touched, when the credential declares no certificate
+  # identity: the external entry point would refuse a collector without one.
+  when: alloy_collector_issue_certificate | bool
+
+- name: Look for what the collector needs on the control machine
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    get_checksum: false
+  loop: "{{ [alloy_collector_rendered_dir ~ '/datastream.alloy'] + (alloy_collector_secret_files.values() | list) }}"
+  delegate_to: localhost
+  become: false
+  register: alloy_collector_inputs
+
+- name: Refuse to install a collector that could not deliver
+  ansible.builtin.assert:
+    that: alloy_collector_inputs.results | map(attribute='stat.exists') | min
+    fail_msg: >-
+      Not found on the control machine:
+      {{ alloy_collector_inputs.results | rejectattr('stat.exists') | map(attribute='item') | join(', ') }}.
+      The collector needs its rendered configuration (`render-collector`), its credential
+      (`materialize-secrets`), the gateway's authority, and a client certificate for a credential that
+      declares a certificate identity. {{ inventory_hostname }} was not changed.
+    quiet: true
+
+- name: Read the rendered configuration files
+  ansible.builtin.find:
+    paths: "{{ alloy_collector_rendered_dir }}"
+    patterns: "*.alloy"
+    get_checksum: true
+  delegate_to: localhost
+  become: false
+  register: alloy_collector_rendered
+
+- name: Take one digest of the whole configuration
+  ansible.builtin.set_fact:
+    alloy_collector_config_digest: >-
+      {{ (alloy_collector_rendered.files | sort(attribute='path') | map(attribute='path') | map('basename')
+          | zip(alloy_collector_rendered.files | sort(attribute='path') | map(attribute='checksum'))
+          | map('join', ' ') | join('\n')) | hash('sha256') }}

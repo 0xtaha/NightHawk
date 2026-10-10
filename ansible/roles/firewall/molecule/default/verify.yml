@@ -1,0 +1,147 @@
+- name: The written rules are the contract's rules for this role
+  hosts: all
+  gather_facts: true
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  vars:
+    firewall_test_family: "{{ ansible_facts['os_family'] }}"
+  tasks:
+    - name: Read the plan
+      ansible.builtin.slurp:
+        src: /etc/nighthawk/firewall/plan.json
+      register: firewall_test_plan_file
+
+    - name: Decode it
+      ansible.builtin.set_fact:
+        firewall_test_plan: "{{ firewall_test_plan_file.content | b64decode | from_json }}"
+
+    - name: One entry per contract rule of a Docker host, with its protocol, port, and the supplied addresses
+      ansible.builtin.assert:
+        that:
+          - firewall_test_plan | map(attribute='id') | list == nighthawk.firewall.docker_host | map(attribute='id') | sort
+          - >-
+            firewall_test_plan | map(attribute='port') | list
+            == nighthawk.firewall.docker_host | sort(attribute='id') | map(attribute='port') | list
+          - >-
+            (firewall_test_plan | selectattr('id', 'equalto', 'ssh-administration') | first).sources
+            == ['198.51.100.0/24', '2001:db8:1::/48']
+          - >-
+            (firewall_test_plan | selectattr('id', 'equalto', 'remote-gateway') | first).sources
+            == ['203.0.113.0/24', '203.0.113.200']
+
+    - name: Nothing was activated, so no plan is recorded as in force
+      ansible.builtin.stat:
+        path: /etc/nighthawk/firewall/active-plan.json
+      register: firewall_test_active
+      failed_when: firewall_test_active.stat.exists
+
+    - name: Read the apply script
+      ansible.builtin.slurp:
+        src: /usr/local/sbin/nighthawk-firewall-apply
+      register: firewall_test_apply
+
+    - name: It has one line per rule and address, and nothing for a port outside the contract
+      ansible.builtin.assert:
+        that:
+          - >-
+            (firewall_test_apply.content | b64decode | split('\n') | select('match', '^(ufw allow|firewall-cmd .*--add-rich-rule)') | list | length)
+            == (firewall_test_plan | map(attribute='sources') | map('length') | sum)
+          - "item.port | string in firewall_test_apply.content | b64decode"
+          - "'8443' not in firewall_test_apply.content | b64decode"
+          - "'0.0.0.0/0' not in firewall_test_apply.content | b64decode"
+      loop: "{{ firewall_test_plan }}"
+      loop_control:
+        label: "{{ item.id }}"
+
+    - name: Inbound traffic is denied by default
+      ansible.builtin.assert:
+        that: >-
+          ('ufw default deny incoming' in firewall_test_apply.content | b64decode)
+          if firewall_test_family == 'Debian' else ('--set-target DROP' in firewall_test_apply.content | b64decode)
+
+    - name: SSH is allowed before the firewall is switched on (UFW)
+      ansible.builtin.assert:
+        that: >-
+          (firewall_test_apply.content | b64decode).index('ssh-administration')
+          < (firewall_test_apply.content | b64decode).index('ufw --force enable')
+      when: firewall_test_family == 'Debian'
+
+    - name: Look at the scripts
+      ansible.builtin.stat:
+        path: "/usr/local/sbin/{{ item }}"
+      register: firewall_test_scripts
+      loop: [nighthawk-firewall-apply, nighthawk-firewall-rollback, nighthawk-firewall-docker]
+
+    - name: They are root-only and each passes the shell's syntax check
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.mode == '0700'
+      loop: "{{ firewall_test_scripts.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Check script syntax
+      ansible.builtin.command:
+        cmd: "sh -n /usr/local/sbin/{{ item }}"
+      changed_when: false
+      loop: [nighthawk-firewall-apply, nighthawk-firewall-rollback, nighthawk-firewall-docker]
+
+    - name: Read the container runtime script
+      ansible.builtin.slurp:
+        src: /usr/local/sbin/nighthawk-firewall-docker
+      register: firewall_test_docker
+
+    - name: The published external entry point is limited to the collector allowlist, then dropped
+      ansible.builtin.assert:
+        that:
+          - "'-s 203.0.113.0/24 -j RETURN' in firewall_test_docker.content | b64decode"
+          - "'--ctorigdstport ' ~ nighthawk.gateway.external_port | default(443, true) in firewall_test_docker.content | b64decode"
+          - "'-j DROP' in firewall_test_docker.content | b64decode"
+          - "'198.51.100.0/24' not in firewall_test_docker.content | b64decode"
+
+- name: Each refusal happens before anything is written
+  hosts: all
+  gather_facts: true
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  vars:
+    nighthawk_host_role: docker_host
+    firewall_activate: false
+    firewall_test_good:
+      firewall_connection_address: 198.51.100.7
+      firewall_admin_allowlist: [198.51.100.0/24]
+      firewall_collector_allowlist: [203.0.113.0/24]
+      firewall_requested_ports: []
+    firewall_test_cases:
+      - name: empty-admin-allowlist
+        change: { firewall_admin_allowlist: [] }
+        expect: No address is supplied for admin_allowlist
+      - name: empty-collector-allowlist
+        change: { firewall_collector_allowlist: [] }
+        expect: No address is supplied for collector_allowlist
+      - name: open-to-everyone
+        change: { firewall_collector_allowlist: [0.0.0.0/0] }
+        expect: covers every address
+      - name: open-to-everyone-ipv6
+        change: { firewall_admin_allowlist: [198.51.100.0/24, "::/0"] }
+        expect: covers every address
+      - name: not-an-address
+        change: { firewall_admin_allowlist: [198.51.100.0/24, everyone] }
+        expect: is not an address or a CIDR range
+      - name: own-address-outside
+        change: { firewall_connection_address: 192.0.2.99 }
+        expect: connects from 192.0.2.99, which is outside
+      - name: unknown-connection-address
+        change: { firewall_connection_address: "" }
+        expect: could not be determined
+      - name: port-outside-the-contract
+        change: { firewall_requested_ports: [8080] }
+        expect: Port 8080 is not a rule of the network contract
+  tasks:
+    - name: Try each refused request
+      ansible.builtin.include_tasks: tasks/refusal.yml
+      loop: "{{ firewall_test_cases }}"
+      loop_control:
+        loop_var: firewall_test_case
+        label: "{{ firewall_test_case.name }}"

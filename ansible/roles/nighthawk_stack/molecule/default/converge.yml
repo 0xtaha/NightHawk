@@ -1,0 +1,10 @@
+- name: Deploy the rendered stack without starting it
+  hosts: all
+  gather_facts: true
+  vars:
+    nighthawk_rendered_dir: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/deployment/rendered"
+    nighthawk_secrets_dir: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/deployment/secrets"
+    nighthawk_external_bind_address: 192.0.2.10
+    nighthawk_stack_start: false
+  roles:
+    - role: nighthawk_stack

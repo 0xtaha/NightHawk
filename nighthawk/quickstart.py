@@ -19,14 +19,13 @@ import os
 import secrets as token_source
 import socket
 import subprocess
+import tarfile
 import tempfile
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Callable, Mapping
 
-from cryptography import x509
-from cryptography.exceptions import InvalidSignature
 
 from nighthawk import collector, gateway, grafana, storage, trust
 from nighthawk.config import ROOT, ConfigurationError, Platform, load_platform, load_versions
@@ -36,8 +35,18 @@ from nighthawk.vault import Auth, Client, Transport
 Runner = Callable[..., subprocess.CompletedProcess]
 
 COMPOSE_FILE = ROOT / "docker-compose" / "docker-compose.yaml"
+# Publishes the certificate-requiring external entry point. Never part of the local quickstart.
+EXTERNAL_OVERRIDE = ROOT / "docker-compose" / "docker-compose.external.yaml"
 # Long-running services whose readiness the bring-up waits for; their dependencies follow.
 WAITED_SERVICES = ("grafana", "alloy")
+DEPLOYMENT_MANIFEST = "deployment.json"
+# What the host builds the platform's own image from and runs Compose with: the build context
+# .dockerignore allows, plus the Compose directory.
+SOURCE_ARCHIVE = "source.tar"
+SOURCE_PATHS = ("requirements.txt", "config", "nighthawk", "docker-compose")
+SINGLE_NODE_NOTICE = (
+    "This is a single node without high availability: if that machine is lost, so is its telemetry."
+)
 HOST_COLLECTION_PROFILE, HOST_COLLECTION_SERVICE = "host-collection", "alloy-host"
 RENEW_BEFORE = datetime.timedelta(days=7)
 
@@ -68,6 +77,15 @@ class Options:
     build: bool = True
     project: str = "nighthawk"
     created: list[str] = field(default_factory=list)
+    # Publishing the external entry point, for a deployment other machines reach. The address
+    # is required for that; the published port defaults to the entry point's own port.
+    external_bind_address: str | None = None
+    external_published_port: int | None = None
+    # Where the two trees will live on the host that runs the stack, and the account it runs
+    # as there, when that is not this machine. They only change what compose.env says.
+    remote_rendered_dir: Path | None = None
+    remote_secrets_dir: Path | None = None
+    remote_run_as: tuple[int, int] | None = None
 
 
 VAULT_HELP = (
@@ -95,10 +113,26 @@ def _run(runner: Runner, args: list[str], what: str, **kwargs) -> subprocess.Com
 
 
 def _compose(options: Options) -> list[str]:
+    files = ["--file", str(options.compose_file)]
+    if options.external_bind_address is not None:
+        files += ["--file", str(EXTERNAL_OVERRIDE)]
     return [
-        *options.compose, "--project-name", options.project, "--file", str(options.compose_file),
+        *options.compose, "--project-name", options.project, *files,
         "--env-file", str(options.rendered_dir / "compose.env"),
     ]
+
+
+def external_entry_point(platform: Platform):
+    """The certificate-requiring entry point a deployment publishes for other machines, if selected."""
+    external = [entry for entry in platform.gateway.entry_points if entry.scope == "restricted-external"]
+    return external[0] if len(external) == 1 else None
+
+
+def vault_client(options: Options, platform: Platform) -> tuple[Client | None, list[str]]:
+    """The Vault prerequisite: a client, or what is wrong."""
+    checks, client = doctor(load_versions(), platform, options.vault_auth, options.environ, options.vault_transport)
+    problems = [check.detail for check in checks if not check.ok]
+    return client, ([f"{'; '.join(problems)}; {VAULT_HELP}"] if problems else [])
 
 
 def _is_loopback(address: str) -> bool:
@@ -157,10 +191,8 @@ def preflight(
                 problems.append(f"{name} ({' '.join(args)}) is not usable")
         except (OSError, subprocess.SubprocessError):
             problems.append(f"{name} ({' '.join(args)}) is not installed")
-    checks, client = doctor(load_versions(), platform, options.vault_auth, options.environ, options.vault_transport)
-    vault_problems = [check.detail for check in checks if not check.ok]
-    if vault_problems:
-        problems.append(f"{'; '.join(vault_problems)}; {VAULT_HELP}")
+    client, vault_problems = vault_client(options, platform)
+    problems += vault_problems
     run_as = (os.getuid(), os.getgid())
     if not problems:
         components = runner(
@@ -195,14 +227,18 @@ def _project_volumes(options: Options, runner: Runner) -> list[str]:
 
 
 def ensure_secrets(
-    options: Options, platform: Platform, client: Client, runner: Runner, out: Callable[[str], None],
+    options: Options, platform: Platform, client: Client, runner: Runner | None, out: Callable[[str], None],
 ) -> None:
-    """Create each referenced secret that does not exist yet in Vault. Existing values are never touched."""
+    """Create each referenced secret that does not exist yet in Vault. Existing values are never touched.
+
+    `runner` reaches the container runtime that holds the stack's volumes. It is None when the
+    stack runs on another machine, whose volumes cannot be looked at from here.
+    """
     def exists(reference: str) -> bool:
         return secret_exists(client, platform.secrets[reference])
 
     identities = [reference for reference in trust.storage_identity_refs(platform) if not exists(reference)]
-    volumes = _project_volumes(options, runner) if identities else []
+    volumes = _project_volumes(options, runner) if identities and runner is not None else []
     if volumes:
         # New identities could not read what the lost ones wrote, so nothing is generated.
         raise ConfigurationError(
@@ -260,29 +296,13 @@ def _sync(files: dict[str, str | bytes], target: Path, mode: int) -> bool:
     return changed
 
 
-def _needs_issue(certificate_path: Path, authority: x509.Certificate) -> bool:
-    """Missing, unreadable, close to expiry, or signed by an authority Vault no longer has."""
-    if not certificate_path.exists():
-        return True
-    try:
-        certificate = x509.load_pem_x509_certificate(certificate_path.read_bytes())
-        certificate.verify_directly_issued_by(authority)
-    except (ValueError, TypeError, InvalidSignature):
-        return True
-    return certificate.not_valid_after_utc - datetime.datetime.now(datetime.timezone.utc) < RENEW_BEFORE
-
-
 def _ensure_certificate(
-    options: Options, platform: Platform, client: Client, authority: x509.Certificate, directory: Path,
-    stem: str, **what,
+    options: Options, platform: Platform, client: Client, directory: Path, stem: str, **what,
 ) -> None:
-    certificate_path, key_path = directory / f"{stem}.crt.pem", directory / f"{stem}.key.pem"
-    if not _needs_issue(certificate_path, authority) and key_path.exists():
-        return
-    for path in (certificate_path, key_path):
-        path.unlink(missing_ok=True)
-    trust.issue_certificate(platform, directory, options.certificate_valid_days, client, **what)
-    options.created.append(f"certificate {stem}")
+    # A validity shorter than the usual renewal period still has to outlive one run.
+    renew_before = min(RENEW_BEFORE.days, options.certificate_valid_days - 1)
+    if trust.ensure_certificate(platform, directory, options.certificate_valid_days, client, renew_before, **what):
+        options.created.append(f"certificate {stem}")
 
 
 def select_credentials(options: Options, platform: Platform) -> tuple[str | None, tuple[str, ...]]:
@@ -357,21 +377,20 @@ def render(
         (runtime / name).mkdir(parents=True, exist_ok=True, mode=0o700)
     # The authority is the one in Vault's PKI mount; only its public certificate is ever read.
     ca_certificate = trust.authority_certificate(client)
-    authority = x509.load_pem_x509_certificate(ca_certificate.encode("ascii"))
     previous = runtime / "gateway" / "client-ca.pem"
     if previous.exists() and previous.read_text(encoding="utf-8") != ca_certificate:
         out(
             "The certificate authority in Vault changed. Certificates the quickstart manages are issued again; "
             "any certificate issued separately, such as a remote collector's, must be issued again too."
         )
-    _ensure_certificate(options, platform, client, authority, runtime / "gateway", "gateway-server", server=True)
+    _ensure_certificate(options, platform, client, runtime / "gateway", "gateway-server", server=True)
     if platform.storage_provider == "seaweedfs":
-        _ensure_certificate(options, platform, client, authority, runtime / "storage", "storage-server", storage=True)
+        _ensure_certificate(options, platform, client, runtime / "storage", "storage-server", storage=True)
     stream = _select_stream(options, platform)
     credential = collector._select_credential(platform, stream, collector.PROFILES["docker"], ingest_choice)
     if credential.certificate_identity is not None:
         _ensure_certificate(
-            options, platform, client, authority, runtime / "collector-certificates", credential.id,
+            options, platform, client, runtime / "collector-certificates", credential.id,
             credential_id=credential.id,
         )
 
@@ -446,17 +465,140 @@ def render(
     ) if options.host_collection else {}
     changed["collector-host"] = _sync(host_files, options.rendered_dir / "collector-host", 0o644)
     changed["query-secrets"] = rotated
-    _write(options.rendered_dir / "compose.env", "".join(f"{key}={value}\n" for key, value in {
+    environment: dict[str, object] = {
         "COMPOSE_PROJECT_NAME": options.project,
-        "NIGHTHAWK_RENDERED_DIR": options.rendered_dir.resolve(),
-        "NIGHTHAWK_SECRETS_DIR": options.secrets_dir.resolve(),
+        "NIGHTHAWK_RENDERED_DIR": options.remote_rendered_dir or options.rendered_dir.resolve(),
+        "NIGHTHAWK_SECRETS_DIR": options.remote_secrets_dir or options.secrets_dir.resolve(),
         "NIGHTHAWK_UID": run_as[0],
         "NIGHTHAWK_GID": run_as[1],
         "NIGHTHAWK_BIND_ADDRESS": options.bind_address,
         "NIGHTHAWK_GATEWAY_PORT": local_entry_point(platform).port,
         "NIGHTHAWK_GATEWAY_HOSTNAME": platform.gateway.hostname,
         "NIGHTHAWK_GRAFANA_HOSTNAME": platform.grafana.hostname,
-    }.items()), 0o644)
+    }
+    if options.external_bind_address is not None:
+        external = external_entry_point(platform)
+        if external is None:
+            raise ConfigurationError(
+                "publishing for other machines needs exactly one restricted-external gateway entry point "
+                "selected in the platform document (the remote-gateway rule)"
+            )
+        published = options.external_published_port or external.port
+        environment.update({
+            "NIGHTHAWK_EXTERNAL_BIND_ADDRESS": options.external_bind_address,
+            "NIGHTHAWK_EXTERNAL_PORT": external.port,
+            "NIGHTHAWK_EXTERNAL_PUBLISHED_PORT": published,
+            # Other machines reach the Grafana UI through the external entry point.
+            "NIGHTHAWK_GRAFANA_PORT": published,
+        })
+    _write(options.rendered_dir / "compose.env", "".join(f"{key}={value}\n" for key, value in environment.items()), 0o644)
+    return changed
+
+
+def source_archive(root: Path = ROOT) -> bytes:
+    """The same bytes for the same files: sorted, without owners or times, so a re-render rewrites nothing."""
+    files: list[Path] = []
+    for name in SOURCE_PATHS:
+        path = root / name
+        if not path.exists():
+            raise ConfigurationError(f"{path}: needed to build the platform's image, not found")
+        files += [path] if path.is_file() else [
+            item for item in path.rglob("*") if item.is_file() and "__pycache__" not in item.parts
+        ]
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT) as archive:
+        for path in sorted(files):
+            data = path.read_bytes()
+            entry = tarfile.TarInfo(path.relative_to(root).as_posix())
+            entry.size, entry.mtime = len(data), 0
+            entry.mode = 0o755 if path.stat().st_mode & 0o100 else 0o644
+            archive.addfile(entry, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+def deployment_manifest(options: Options, platform: Platform) -> dict:
+    """What the host needs to know to start what was rendered, so no playbook repeats a service name."""
+    _, query_choice = select_credentials(options, platform)
+    reloads = [
+        {"service": "authz", "rendered": [], "secrets": ["runtime/authz"]},
+        {"service": "alloy", "rendered": ["collector"], "secrets": ["runtime/collector"]},
+    ]
+    if options.host_collection:
+        reloads.append({"service": HOST_COLLECTION_SERVICE, "rendered": ["collector-host"], "secrets": ["runtime/collector"]})
+    return {
+        "project": options.project,
+        "source_archive": SOURCE_ARCHIVE,
+        "compose_files": [
+            path.relative_to(ROOT).as_posix() for path in (ROOT / "docker-compose" / "docker-compose.yaml", EXTERNAL_OVERRIDE)
+        ],
+        "build_service": "authz",
+        "profiles": [HOST_COLLECTION_PROFILE] if options.host_collection else [],
+        "teardown_profiles": ["sample", "tools", HOST_COLLECTION_PROFILE],
+        "waited_services": [*WAITED_SERVICES, *([HOST_COLLECTION_SERVICE] if options.host_collection else [])],
+        "wait_service": "wait-alloy",
+        "wait_timeout": options.timeout,
+        # Services that do not watch their files, and the directories whose change they must be told about.
+        "reload_signal": "HUP",
+        "reloads": reloads,
+        "provision": ["grafana-init", *(part for item in query_choice for part in ("--credential", item))],
+        "notice": SINGLE_NODE_NOTICE,
+    }
+
+
+def render_deployment(options: Options, *, out: Callable[[str], None] = print) -> dict[str, bool]:
+    """Everything the quickstart does before starting containers, for a stack that runs on another machine.
+
+    Checks Vault, creates missing secrets there, obtains certificates, and writes the rendered
+    and secret trees on this machine with a compose.env that names the remote paths. Nothing is
+    started and the remote machine needs no access to Vault.
+    """
+    platform = load_platform(options.config)
+    if platform.deployment != "docker":
+        raise ConfigurationError(f"a Docker deployment needs a docker platform document, not {platform.deployment}")
+    if platform.profile != "production":
+        raise ConfigurationError(
+            "a deployment for another machine needs a platform document with profile: production; "
+            f"this one is {platform.profile}. Nothing was written."
+        )
+    if external_entry_point(platform) is None:
+        raise ConfigurationError(
+            "the platform document does not select the certificate-requiring external entry point "
+            "(remote-gateway) in gateway.entry_points. Nothing was written."
+        )
+    if not options.external_bind_address:
+        raise ConfigurationError(
+            "state the host address the external entry point is published on (--external-bind-address). "
+            "Nothing was written."
+        )
+    try:
+        ipaddress.ip_address(options.external_bind_address)
+    except ValueError:
+        raise ConfigurationError(
+            f"--external-bind-address {options.external_bind_address} is not an IP address. Nothing was written."
+        ) from None
+    if options.remote_rendered_dir is None or options.remote_secrets_dir is None or options.remote_run_as is None:
+        raise ConfigurationError("the remote directories and the remote account's UID and GID are required")
+    for directory in (options.remote_rendered_dir, options.remote_secrets_dir):
+        if not directory.is_absolute():
+            raise ConfigurationError(f"{directory}: the remote directory must be an absolute path")
+    select_credentials(options, platform)
+    client, problems = vault_client(options, platform)
+    if problems or client is None:
+        raise ConfigurationError("prerequisites not met:\n  - " + "\n  - ".join(problems))
+    ensure_secrets(options, platform, client, None, out)
+    # The output directory is usually new; the secret tree itself is created owner-only by materialize.
+    options.secrets_dir.parent.mkdir(parents=True, exist_ok=True)
+    changed = render(options, platform, options.remote_run_as, client, out)
+    _write(
+        options.rendered_dir / DEPLOYMENT_MANIFEST,
+        json.dumps(deployment_manifest(options, platform), indent=2, sort_keys=True) + "\n", 0o644,
+    )
+    _write(options.rendered_dir / SOURCE_ARCHIVE, source_archive(), 0o644)
+    out(f"Rendered a deployment of {platform.gateway.hostname} for another machine.")
+    out(f"  Rendered tree: {options.rendered_dir}  ->  {options.remote_rendered_dir}")
+    out(f"  Secret tree:   {options.secrets_dir}  ->  {options.remote_secrets_dir}")
+    out(f"  {SINGLE_NODE_NOTICE}")
+    out("  Created this run: " + (", ".join(options.created) if options.created else "nothing new"))
     return changed
 
 

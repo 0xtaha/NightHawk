@@ -1,0 +1,15 @@
+- name: Nothing to verify beyond the refusal that converge checks
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Look for anything k3s would have installed
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /usr/local/bin/k3s
+        - /etc/rancher
+      register: k3s_prerequisites_test_installed
+
+    - name: No node was changed
+      ansible.builtin.assert:
+        that: not (k3s_prerequisites_test_installed.results | map(attribute='stat.exists') | max)

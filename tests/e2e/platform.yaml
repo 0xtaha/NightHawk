@@ -17,6 +17,8 @@ gateway:
   entry_points:
   - local-gateway
   - grafana-gateway
+  # Listens in the gateway container always; published only by the case that adds the override.
+  - remote-gateway
   grafana_entry_point: grafana-gateway
   auth_service: http://authz:9180
   upstreams:

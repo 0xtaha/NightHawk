@@ -1,0 +1,3 @@
+# Uses every platform from ansible/molecule/base.yml.
+scenario:
+  name: default

@@ -1,0 +1,188 @@
+- name: Both trees reached the host with the right owners and permissions
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Read what is on the host
+      ansible.builtin.stat:
+        path: "/opt/nighthawk/{{ item }}"
+      loop:
+        - secrets
+        - secrets/runtime/authz/policy.json
+        - secrets/runtime/collector/credential
+        - secrets/kv/nighthawk/local/grafana-admin
+        - secrets/runtime/storage-trust
+        - rendered/compose.env
+        - rendered/collector/config.alloy
+        - source/docker-compose/docker-compose.yaml
+        - source/requirements.txt
+        - source.sha256
+      register: nighthawk_stack_test_files
+
+    - name: Everything is there, secrets for the stack's account only
+      ansible.builtin.assert:
+        that:
+          - nighthawk_stack_test_files.results | map(attribute='stat.exists') | min
+          - nighthawk_stack_test_files.results[0].stat.mode == '0700'
+          - nighthawk_stack_test_files.results[0].stat.uid == 2001
+          - nighthawk_stack_test_files.results[1].stat.mode == '0600'
+          - nighthawk_stack_test_files.results[2].stat.mode == '0600'
+          - nighthawk_stack_test_files.results[3].stat.mode == '0600'
+          - nighthawk_stack_test_files.results[1].stat.uid == 2001
+          - nighthawk_stack_test_files.results[1].stat.gid == 2002
+          - nighthawk_stack_test_files.results[4].stat.isdir
+          - nighthawk_stack_test_files.results[4].stat.mode == '0700'
+          - nighthawk_stack_test_files.results[5].stat.mode == '0644'
+          - nighthawk_stack_test_files.results[5].stat.uid == 0
+
+    - name: Read the stack's account
+      ansible.builtin.getent:
+        database: passwd
+        key: nighthawk
+
+    - name: It has the rendered UID and GID and cannot log in
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['getent_passwd']['nighthawk'][1] == '2001'
+          - ansible_facts['getent_passwd']['nighthawk'][2] == '2002'
+          - ansible_facts['getent_passwd']['nighthawk'][5] == '/usr/sbin/nologin'
+
+- name: The deployment is rendered again with one secret changed and one file gone
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    nighthawk_stack_test_root: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/deployment"
+  tasks:
+    - name: Change the authorization policy
+      ansible.builtin.copy:
+        content: "{\"version\": 2}\n"
+        dest: "{{ nighthawk_stack_test_root }}/secrets/runtime/authz/policy.json"
+        mode: "0600"
+
+    - name: Stop rendering one file
+      ansible.builtin.file:
+        path: "{{ nighthawk_stack_test_root }}/rendered/contracts/dropped.yaml"
+        state: absent
+
+- name: Only what changed is replaced, and the right service is told
+  hosts: all
+  gather_facts: true
+  vars:
+    nighthawk_rendered_dir: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/deployment/rendered"
+    nighthawk_secrets_dir: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/deployment/secrets"
+    nighthawk_external_bind_address: 192.0.2.10
+    nighthawk_stack_start: false
+  tasks:
+    - name: Read the collector's credential before
+      ansible.builtin.stat:
+        path: /opt/nighthawk/secrets/runtime/collector/credential
+      register: nighthawk_stack_test_before
+
+    - name: Deploy again
+      ansible.builtin.include_role:
+        name: nighthawk_stack
+
+    - name: Read the files afterwards
+      ansible.builtin.stat:
+        path: "/opt/nighthawk/{{ item }}"
+      loop:
+        - secrets/runtime/collector/credential
+        - rendered/contracts/dropped.yaml
+        - rendered/contracts/kept.yaml
+      register: nighthawk_stack_test_after
+
+    - name: Read the policy on the host
+      ansible.builtin.slurp:
+        src: /opt/nighthawk/secrets/runtime/authz/policy.json
+      register: nighthawk_stack_test_policy
+      no_log: true
+
+    - name: Only the auth service is told, the dropped file is gone, the untouched secret was not rewritten
+      ansible.builtin.assert:
+        that:
+          - nighthawk_stack_reloads == ['authz']
+          - not nighthawk_stack_source_changed
+          - not nighthawk_stack_test_after.results[1].stat.exists
+          - nighthawk_stack_test_after.results[2].stat.exists
+          - nighthawk_stack_test_after.results[0].stat.mtime == nighthawk_stack_test_before.stat.mtime
+          - (nighthawk_stack_test_policy.content | b64decode | from_json).version == 2
+
+- name: A deployment rendered for another address is refused
+  hosts: all
+  gather_facts: false
+  vars:
+    nighthawk_rendered_dir: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/deployment/rendered"
+    nighthawk_secrets_dir: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/deployment/secrets"
+    nighthawk_external_bind_address: 192.0.2.99
+    nighthawk_stack_start: false
+  tasks:
+    - name: Deploy it and expect a refusal
+      block:
+        - name: Run the role
+          ansible.builtin.include_role:
+            name: nighthawk_stack
+
+        - name: This must not be reached
+          ansible.builtin.fail:
+            msg: A deployment rendered for another address was accepted.
+      rescue:
+        - name: It refused before copying
+          ansible.builtin.assert:
+            that:
+              - "'192.0.2.99' in ansible_failed_result.msg"
+              - "'Nothing was copied' in ansible_failed_result.msg"
+
+- name: Teardown keeps data unless a purge is confirmed by name
+  hosts: all
+  gather_facts: false
+  vars:
+    nighthawk_stack_start: false
+  tasks:
+    - name: Ask for a purge without confirming it
+      block:
+        - name: Run the teardown
+          ansible.builtin.include_role:
+            name: nighthawk_stack
+            tasks_from: teardown
+          vars:
+            nighthawk_stack_purge: true
+
+        - name: This must not be reached
+          ansible.builtin.fail:
+            msg: An unconfirmed purge was accepted.
+      rescue:
+        - name: It refused
+          ansible.builtin.assert:
+            that: "'Nothing was deleted' in ansible_failed_result.msg"
+
+    - name: Run an ordinary teardown
+      ansible.builtin.include_role:
+        name: nighthawk_stack
+        tasks_from: teardown
+
+    - name: Look for the secret files
+      ansible.builtin.stat:
+        path: /opt/nighthawk/secrets/runtime/authz/policy.json
+      register: nighthawk_stack_test_kept
+
+    - name: They were kept both times
+      ansible.builtin.assert:
+        that: nighthawk_stack_test_kept.stat.exists
+
+    - name: Purge, confirmed with this host's name
+      ansible.builtin.include_role:
+        name: nighthawk_stack
+        tasks_from: teardown
+      vars:
+        nighthawk_stack_purge: true
+        nighthawk_stack_purge_confirm: "{{ inventory_hostname }}"
+
+    - name: Look for the stack's files
+      ansible.builtin.stat:
+        path: "/opt/nighthawk/{{ item }}"
+      loop: [secrets, rendered, source]
+      register: nighthawk_stack_test_purged
+
+    - name: They are gone
+      ansible.builtin.assert:
+        that: not (nighthawk_stack_test_purged.results | map(attribute='stat.exists') | max)

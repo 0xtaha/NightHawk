@@ -1,0 +1,4 @@
+# Uses every platform from ansible/molecule/base.yml. The packages are installed for real; the
+# daemon is not started, because a rootless test container cannot run one.
+scenario:
+  name: default

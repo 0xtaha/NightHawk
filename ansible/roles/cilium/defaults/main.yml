@@ -1,0 +1,8 @@
+# k3s applies every manifest in this directory through its built-in Helm controller, so no
+# Helm binary or cluster credential is needed on the control machine.
+cilium_manifest_dir: /var/lib/rancher/k3s/server/manifests
+cilium_chart_repository: https://helm.cilium.io/
+cilium_first_server: "{{ groups['k3s_servers'] | first }}"
+cilium_api_host: "{{ hostvars[cilium_first_server]['ansible_host'] | default(cilium_first_server) }}"
+# One operator on a single node; two anywhere else.
+cilium_operator_replicas: "{{ 1 if (groups['k3s_servers'] | length + groups['k3s_agents'] | default([]) | length) == 1 else 2 }}"

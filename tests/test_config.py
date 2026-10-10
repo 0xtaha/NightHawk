@@ -486,7 +486,7 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(
             {path.name for path in first.iterdir()},
             {
-                "platform.json", "network.json", "ports.md", "unenforced-limits.json", "gateway", "grafana", "backends", "vault",
+                "platform.json", "network.json", "ports.md", "unenforced-limits.json", "gateway", "grafana", "backends", "vault", "ansible",
                 "mimir-overrides.yaml", "loki-overrides.yaml", "tempo-overrides.yaml", "pyroscope-overrides.yaml",
             },
         )

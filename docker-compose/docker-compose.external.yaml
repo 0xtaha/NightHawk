@@ -1,0 +1,9 @@
+# Publishes the gateway's certificate-requiring external entry point for other machines:
+#   docker compose -f docker-compose.yaml -f docker-compose.external.yaml --env-file <compose.env> up
+# Without this file only the loopback entry point is published. The address has no default:
+# NIGHTHAWK_EXTERNAL_BIND_ADDRESS must be stated. Ingestion on this entry point needs a client
+# certificate; restrict who can reach it with the host firewall as well.
+services:
+  traefik:
+    ports:
+      - "${NIGHTHAWK_EXTERNAL_BIND_ADDRESS:?}:${NIGHTHAWK_EXTERNAL_PUBLISHED_PORT:-${NIGHTHAWK_EXTERNAL_PORT:?}}:${NIGHTHAWK_EXTERNAL_PORT:?}"

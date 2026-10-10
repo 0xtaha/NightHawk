@@ -8,8 +8,8 @@ from pathlib import Path
 import yaml
 
 from nighthawk.config import (
-    ROOT, ConfigurationError, chart_version_problems, check_pins, is_os_supported, load_versions, validate_pin_changes,
-    vault_supports,
+    ROOT, ConfigurationError, artifact_checksum_problems, chart_version_problems, check_pins, is_os_supported, load_versions, validate_pin_changes,
+    supported_architectures, vault_supports,
 )
 
 
@@ -45,6 +45,71 @@ class VersionsTests(unittest.TestCase):
         matrix = load_versions()
         self.assertTrue(is_os_supported(matrix, "docker_hosts", "debian", "12", "amd64"))
         self.assertFalse(is_os_supported(matrix, "k3s_nodes", "debian", "12", "amd64"))
+
+    def test_rhel_family_is_supported_for_docker_hosts_only(self) -> None:
+        matrix = load_versions()
+        for distribution in ("rocky", "almalinux"):
+            for architecture in ("amd64", "arm64"):
+                self.assertTrue(is_os_supported(matrix, "docker_hosts", distribution, "9", architecture))
+                self.assertFalse(is_os_supported(matrix, "k3s_nodes", distribution, "9", architecture))
+            self.assertFalse(is_os_supported(matrix, "docker_hosts", distribution, "8", "amd64"))
+
+    def test_every_os_entry_states_its_evidence(self) -> None:
+        matrix = load_versions()
+        for target, entries in matrix["os_support"].items():
+            for entry in entries:
+                self.assertIn(entry["evidence"], ("container", "host", "declared"), (target, entry["distribution"]))
+        document = copy.deepcopy(self.matrix)
+        del document["os_support"]["docker_hosts"][0]["evidence"]
+        with self.assertRaisesRegex(ConfigurationError, "'evidence' is a required property"):
+            load_versions(self.write(document))
+        document = copy.deepcopy(self.matrix)
+        document["os_support"]["docker_hosts"][0]["evidence"] = "assumed"
+        with self.assertRaises(ConfigurationError):
+            load_versions(self.write(document))
+
+    def test_automation_tools_and_collections_are_pinned_exactly(self) -> None:
+        tools = load_versions()["automation_tools"]
+        for name in ("ansible_core", "ansible_lint", "molecule", "molecule_plugins"):
+            self.assertRegex(tools[name]["version"], r"^[0-9]+\.[0-9]+\.[0-9]+$")
+            self.assertTrue(tools[name]["source"])
+        self.assertLessEqual(
+            {"ansible.posix", "community.general"}, {item["name"] for item in tools["collections"].values()},
+        )
+        for name in ("ansible_core", "collections"):
+            document = copy.deepcopy(self.matrix)
+            del document["automation_tools"][name]
+            with self.assertRaises(ConfigurationError):
+                load_versions(self.write(document))
+        document = copy.deepcopy(self.matrix)
+        document["automation_tools"]["collections"]["ansible_posix"]["version"] = ">=2.0"
+        with self.assertRaises(ConfigurationError):
+            load_versions(self.write(document))
+
+    def test_host_artifacts_have_a_checksum_per_supported_architecture(self) -> None:
+        matrix = load_versions()
+        self.assertEqual(supported_architectures(matrix), ["amd64", "arm64"])
+        self.assertEqual(artifact_checksum_problems(matrix), [])
+        for artifact in ("k3s", "alloy"):
+            document = copy.deepcopy(self.matrix)
+            del document["host_artifacts"][artifact]["sha256"]["linux_arm64"]
+            with self.assertRaisesRegex(
+                ConfigurationError, f"host_artifacts.{artifact} has no checksum for linux_arm64",
+            ):
+                load_versions(self.write(document))
+
+    def test_docker_repository_keys_are_pinned_by_fingerprint(self) -> None:
+        docker = load_versions()["host_artifacts"]["docker_engine"]
+        self.assertEqual(sorted(docker["signing_key_fingerprints"]), ["apt", "rpm"])
+        for family in ("apt", "rpm"):
+            document = copy.deepcopy(self.matrix)
+            del document["host_artifacts"]["docker_engine"]["signing_key_fingerprints"][family]
+            with self.assertRaises(ConfigurationError):
+                load_versions(self.write(document))
+        document = copy.deepcopy(self.matrix)
+        document["host_artifacts"]["docker_engine"]["signing_key_fingerprints"]["apt"] = "not-a-fingerprint"
+        with self.assertRaises(ConfigurationError):
+            load_versions(self.write(document))
 
     def test_os_support_rejects_undeclared_target(self) -> None:
         matrix = load_versions()

@@ -601,6 +601,162 @@ class RotatedSecretTests(QuickstartFixture):
         self.assertNotIn("--update-secrets", self.provision_calls()[-1])
 
 
+class RemoteDeploymentTests(QuickstartFixture):
+    """Rendering a deployment for another machine: no container runtime is involved here."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.data["profile"] = "production"
+        self.data["vault"]["address"] = "https://vault.example.com:8200"
+        self.data["gateway"]["entry_points"] = ["local-gateway", "grafana-gateway", "remote-gateway"]
+        self.vault = FakeVault(load_platform(write_document(self.root, self.data)))
+
+    def options(self, **overrides) -> quickstart.Options:
+        values = {
+            "config": write_document(self.root, self.data), "root": self.root,
+            "rendered_dir": self.root / "out" / "rendered", "secrets_dir": self.root / "out" / "secrets",
+            "environ": self.environ, "vault_transport": self.vault,
+            "remote_rendered_dir": Path("/opt/nighthawk/rendered"), "remote_secrets_dir": Path("/opt/nighthawk/secrets"),
+            "remote_run_as": (2001, 2002), "external_bind_address": "192.0.2.10",
+        }
+        values.update(overrides)
+        return quickstart.Options(**values)
+
+    def render(self, **overrides) -> quickstart.Options:
+        options = self.options(**overrides)
+        quickstart.render_deployment(options, out=self.lines.append)
+        return options
+
+    def environment(self, options: quickstart.Options) -> dict[str, str]:
+        text = (options.rendered_dir / "compose.env").read_text(encoding="utf-8")
+        return dict(line.split("=", 1) for line in text.splitlines())
+
+    def test_renders_both_trees_addressed_for_the_remote_host_and_starts_nothing(self) -> None:
+        options = self.render()
+        environment = self.environment(options)
+        self.assertEqual(environment["NIGHTHAWK_RENDERED_DIR"], "/opt/nighthawk/rendered")
+        self.assertEqual(environment["NIGHTHAWK_SECRETS_DIR"], "/opt/nighthawk/secrets")
+        self.assertEqual((environment["NIGHTHAWK_UID"], environment["NIGHTHAWK_GID"]), ("2001", "2002"))
+        self.assertEqual(environment["NIGHTHAWK_BIND_ADDRESS"], "127.0.0.1")
+        self.assertEqual(environment["NIGHTHAWK_EXTERNAL_BIND_ADDRESS"], "192.0.2.10")
+        self.assertEqual(environment["NIGHTHAWK_EXTERNAL_PORT"], "443")
+        self.assertEqual(environment["NIGHTHAWK_EXTERNAL_PUBLISHED_PORT"], "443")
+        self.assertEqual(environment["NIGHTHAWK_GRAFANA_PORT"], "443")
+        for path in ("runtime/authz/policy.json", "runtime/gateway/gateway-server.key.pem", "runtime/collector/credential"):
+            self.assertTrue((options.secrets_dir / path).is_file(), path)
+        self.assertTrue((options.rendered_dir / "contracts" / "ansible" / "nighthawk.yml").is_file())
+        self.assertEqual(sorted(self.stored()), sorted(self.data["secrets"]))
+        # The container runtime of this machine was never asked anything.
+        self.assertEqual(self.host.compose_calls, [])
+        self.assertEqual(self.host.environments, [])
+        text = "\n".join(self.lines)
+        self.assertIn("single node without high availability", text)
+        self.assertIn("/opt/nighthawk/secrets", text)
+        manifest = json.loads((options.rendered_dir / "deployment.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            manifest["compose_files"], ["docker-compose/docker-compose.yaml", "docker-compose/docker-compose.external.yaml"],
+        )
+        import tarfile
+        with tarfile.open(options.rendered_dir / manifest["source_archive"]) as archive:
+            names = archive.getnames()
+            self.assertEqual({entry.mtime for entry in archive.getmembers()}, {0})
+        for name in ("requirements.txt", "nighthawk/__main__.py", "config/versions.yaml", "docker-compose/nighthawk.Dockerfile", *manifest["compose_files"]):
+            self.assertIn(name, names)
+        # Only what the image and Compose need: no secret, test, or rendered output can travel in it.
+        self.assertEqual({name.split("/")[0] for name in names}, {"requirements.txt", "nighthawk", "config", "docker-compose"})
+        self.assertFalse([name for name in names if "__pycache__" in name])
+        self.assertEqual(manifest["waited_services"], ["grafana", "alloy"])
+        self.assertEqual(manifest["profiles"], [])
+        self.assertEqual([item["service"] for item in manifest["reloads"]], ["authz", "alloy"])
+        self.assertEqual(manifest["provision"], ["grafana-init"])
+        self.assertIn("single node without high availability", manifest["notice"])
+        hosted = self.render(host_collection=True, rendered_dir=self.root / "other" / "rendered", secrets_dir=self.root / "other" / "secrets")
+        manifest = json.loads((hosted.rendered_dir / "deployment.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["profiles"], ["host-collection"])
+        self.assertEqual(manifest["waited_services"][-1], "alloy-host")
+        self.assertEqual(manifest["reloads"][-1]["rendered"], ["collector-host"])
+
+    def test_second_render_creates_and_rewrites_nothing(self) -> None:
+        self.render()
+        before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in self.created_files()}
+        versions, signed = len(self.vault.kv["nighthawk/local"]), self.signed()
+        second = self.render()
+        self.assertEqual(second.created, [])
+        self.assertEqual((len(self.vault.kv["nighthawk/local"]), self.signed()), (versions, signed))
+        self.assertEqual({path: (path.read_bytes(), path.stat().st_mtime_ns) for path in self.created_files()}, before)
+
+    def test_no_written_file_holds_the_vault_credential(self) -> None:
+        self.render()
+        self.assertTrue(self.created_files())
+        for path in self.created_files():
+            self.assertNotIn(TOKEN, path.read_text(encoding="utf-8", errors="replace"), path)
+        self.assertNotIn(TOKEN, "\n".join(self.lines))
+
+    def test_development_document_is_refused_before_anything_is_written(self) -> None:
+        self.data["profile"] = "development"
+        with self.assertRaisesRegex(ConfigurationError, "needs a platform document with profile: production"):
+            self.render()
+        self.assert_nothing_happened()
+        self.assertEqual(self.vault.calls, [])
+
+    def test_document_without_the_external_entry_point_is_refused(self) -> None:
+        self.data["gateway"]["entry_points"] = ["local-gateway", "grafana-gateway"]
+        with self.assertRaisesRegex(ConfigurationError, "does not select the certificate-requiring external entry point"):
+            self.render()
+        self.assert_nothing_happened()
+
+    def test_missing_or_malformed_external_address_is_refused(self) -> None:
+        for address, expected in ((None, "state the host address"), ("", "state the host address"), ("gateway.example.com", "is not an IP address")):
+            with self.subTest(address=address), self.assertRaisesRegex(ConfigurationError, expected):
+                self.render(external_bind_address=address)
+        self.assert_nothing_happened()
+
+    def test_remote_paths_must_be_absolute_and_the_account_stated(self) -> None:
+        with self.assertRaisesRegex(ConfigurationError, "must be an absolute path"):
+            self.render(remote_rendered_dir=Path("relative/rendered"))
+        with self.assertRaisesRegex(ConfigurationError, "UID and GID are required"):
+            self.render(remote_run_as=None)
+        self.assert_nothing_happened()
+
+    def test_production_refuses_a_root_credential_and_names_vault_problems(self) -> None:
+        from tests.fakes import ROOT_TOKEN
+        self.environ["VAULT_TOKEN"] = ROOT_TOKEN
+        with self.assertRaisesRegex(ConfigurationError, "production refuses a Vault credential that carries the root policy"):
+            self.render()
+        self.environ["VAULT_TOKEN"] = TOKEN
+        self.vault.sealed = True
+        with self.assertRaisesRegex(ConfigurationError, "is sealed"):
+            self.render()
+        self.assert_nothing_happened()
+
+    def test_command_line_wires_every_option(self) -> None:
+        from unittest import mock
+        from nighthawk.__main__ import main
+
+        with mock.patch("nighthawk.quickstart.render_deployment") as rendered:
+            status = main([
+                "render-docker-deployment", "--config", str(write_document(self.root, self.data)),
+                "--output", str(self.root / "out"), "--remote-dir", "/opt/nighthawk", "--uid", "2001", "--gid", "2002",
+                "--external-bind-address", "192.0.2.10", "--vault-token-file", str(self.root / "token"),
+            ])
+        self.assertEqual(status, 0)
+        (options,), _ = rendered.call_args
+        self.assertEqual(options.rendered_dir, self.root / "out" / "rendered")
+        self.assertEqual(options.secrets_dir, self.root / "out" / "secrets")
+        self.assertEqual(options.remote_rendered_dir, Path("/opt/nighthawk/rendered"))
+        self.assertEqual(options.remote_secrets_dir, Path("/opt/nighthawk/secrets"))
+        self.assertEqual(options.remote_run_as, (2001, 2002))
+        self.assertEqual(options.external_bind_address, "192.0.2.10")
+
+    def test_the_local_quickstart_cannot_publish_the_external_entry_point(self) -> None:
+        import io
+        from contextlib import redirect_stderr
+        from nighthawk.__main__ import main
+
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            main(["quickstart-docker", "--external-bind-address", "192.0.2.10"])
+
+
 class CommandLineTests(QuickstartFixture):
     def test_vault_credential_options_reach_the_quickstart_and_the_authority_option_is_gone(self) -> None:
         import io

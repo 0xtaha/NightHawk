@@ -1,0 +1,22 @@
+# Where the stack lives on the host. `render-docker-deployment --remote-dir` must name the same
+# directory: the rendered Compose environment refers to paths below it.
+nighthawk_stack_dir: /opt/nighthawk
+# The account that owns the secret files. Its UID and GID are the ones the deployment was
+# rendered for (`--uid`, `--gid`), because the containers run as them.
+nighthawk_stack_user: nighthawk
+# Build the image and start the stack. A test container has no container runtime to start it with.
+nighthawk_stack_start: true
+
+# Teardown (tasks_from: teardown). Volumes, secrets, and certificates are kept unless a purge
+# is confirmed by giving this host's inventory name.
+nighthawk_stack_purge: false
+nighthawk_stack_purge_confirm: ""
+
+nighthawk_stack_rendered_target: "{{ nighthawk_stack_dir }}/rendered"
+nighthawk_stack_secrets_target: "{{ nighthawk_stack_dir }}/secrets"
+nighthawk_stack_source_target: "{{ nighthawk_stack_dir }}/source"
+# How Compose is addressed on the host. The manifest is the one rendered with the deployment.
+nighthawk_stack_compose: >-
+  {{ ['docker', 'compose', '--project-name=' ~ nighthawk_stack_manifest.project]
+     + (nighthawk_stack_manifest.compose_files | map('regex_replace', '^', '--file=' ~ nighthawk_stack_source_target ~ '/') | list)
+     + ['--env-file=' ~ nighthawk_stack_rendered_target ~ '/compose.env'] }}

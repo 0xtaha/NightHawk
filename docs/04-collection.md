@@ -105,6 +105,11 @@ one is rejected by the gateway anyway.
 - Device and service metrics: run the relevant exporter and list it in the
   `external-service` targets file, or annotate its Kubernetes service.
 
+To run the `vm` or `external-service` profile as a confined systemd service
+on a machine outside the platform, with its credential and a client
+certificate that renews itself when the playbook is run again, see
+[External collectors](08-ansible.md#external-collectors).
+
 ### Node and cluster split
 
 Deploy `k8s-node` as a DaemonSet and `k8s-cluster` as a Deployment or

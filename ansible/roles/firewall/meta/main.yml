@@ -1,0 +1,15 @@
+galaxy_info:
+  role_name: firewall
+  namespace: nighthawk
+  author: NightHawk
+  description: A default-deny host firewall derived from the network contract, with lockout protection.
+  license: Proprietary
+  min_ansible_version: "2.21"
+  platforms:
+    - name: Ubuntu
+      versions: [jammy, noble]
+    - name: Debian
+      versions: [bookworm]
+    - name: EL
+      versions: ["9"]
+dependencies: []

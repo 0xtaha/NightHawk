@@ -1,0 +1,11 @@
+- name: Install the pinned Docker Engine
+  hosts: all
+  gather_facts: true
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  vars:
+    nighthawk_host_role: docker_host
+    docker_engine_manage_service: false
+  roles:
+    - role: preflight
+    - role: docker_engine

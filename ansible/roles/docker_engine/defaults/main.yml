@@ -1,0 +1,26 @@
+# Docker's package repositories. Rocky Linux and AlmaLinux use the CentOS repository, as
+# Docker's own instructions for RHEL-compatible systems do.
+docker_engine_repository_base: https://download.docker.com/linux
+docker_engine_repository_distribution: >-
+  {{ 'centos' if ansible_facts['os_family'] == 'RedHat' else ansible_facts['distribution'] | lower }}
+docker_engine_key_path: /etc/pki/nighthawk/docker.asc
+docker_engine_keyring: /etc/apt/keyrings/nighthawk-docker.gpg
+
+# A different installed version is an error. Set this to let the role change it.
+docker_engine_allow_version_change: false
+# Start the daemon and enable it at boot. A test container cannot run it.
+docker_engine_manage_service: true
+
+docker_engine_packages: [docker-ce, docker-ce-cli]
+
+# How Docker names things in its apt repository.
+docker_engine_apt_architecture: >-
+  {{ {'x86_64': 'amd64', 'aarch64': 'arm64'}.get(ansible_facts['architecture'], ansible_facts['architecture']) }}
+docker_engine_apt_source: >-
+  {{ docker_engine_repository_base }}/{{ docker_engine_repository_distribution }}
+  {{ ansible_facts['distribution_release'] }} stable
+docker_engine_apt_release: >-
+  {{ ansible_facts['distribution_version'] if ansible_facts['distribution'] == 'Ubuntu'
+     else ansible_facts['distribution_major_version'] }}
+docker_engine_apt_suffix: >-
+  {{ docker_engine_repository_distribution }}.{{ docker_engine_apt_release }}~{{ ansible_facts['distribution_release'] }}

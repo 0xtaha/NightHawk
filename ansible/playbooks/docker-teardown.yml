@@ -1,0 +1,11 @@
+# Stop and remove the NightHawk containers on a Docker host. Volumes, secret files, and
+# certificates are kept. To delete them too:
+#   -e nighthawk_stack_purge=true -e nighthawk_stack_purge_confirm=<the host's inventory name>
+- name: Tear down the NightHawk stack
+  hosts: docker_hosts
+  gather_facts: false
+  tasks:
+    - name: Remove the containers, keeping data unless a purge is confirmed
+      ansible.builtin.include_role:
+        name: nighthawk_stack
+        tasks_from: teardown

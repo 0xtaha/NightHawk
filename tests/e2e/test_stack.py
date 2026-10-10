@@ -42,12 +42,18 @@ VAULT_DEV_TOKEN = "nighthawk-e2e-dev-root"
 PROFILE_TYPE = fixtures.PROFILE_TYPE
 
 
+# The external entry point, as a deployment for another machine publishes it. A second loopback
+# address and an unprivileged port stand in for the host's own address and the contract's port.
+EXTERNAL_ADDRESS, EXTERNAL_PORT = "127.0.0.2", 9444
+EXTERNAL: dict[str, object] = {}
+
+
 def options(*credentials: str) -> quickstart.Options:
     compose = tuple(os.environ.get("NIGHTHAWK_COMPOSE", "docker compose").split())
     return quickstart.Options(
         config=CONFIG, compose=compose, container=compose[0], rendered_dir=WORK / "rendered",
         secrets_dir=SECRETS, project="nighthawk-e2e", build=False, timeout=600, tenant="acme", datastream="web",
-        credentials=credentials,
+        credentials=credentials, **EXTERNAL,
     )
 
 
@@ -115,13 +121,13 @@ def call(
     path: str, credential: str | None = None, *, host: str | None = None, method: str = "GET",
     headers: dict[str, str] | None = None, data: bytes | None = None, params: dict[str, str] | None = None,
     certificate: Path | None = None, password: str | None = None, user: str | None = None, http2: bool = False,
-    include_headers: bool = False,
+    include_headers: bool = False, address: str = "127.0.0.1", port: int = PORT, published: int | None = None,
 ) -> tuple[int, str]:
     platform = load_platform(CONFIG)
     host = host or platform.gateway.hostname
     command = [
         "curl", "--silent", "--max-time", "30", "--cacert", str(SECRETS / "runtime" / "grafana" / "gateway-ca.pem"),
-        "--resolve", f"{host}:{PORT}:127.0.0.1", "--request", method, "--write-out", "\n%{http_code}",
+        "--resolve", f"{host}:{published or port}:{address}", "--request", method, "--write-out", "\n%{http_code}",
     ]
     if credential is not None or user is not None:
         name = user or credential
@@ -140,7 +146,9 @@ def call(
             command += ["--data-urlencode", f"{key}={value}"]
     if data is not None:
         command += ["--data-binary", "@-"]
-    result = subprocess.run(command + [f"https://{host}:{PORT}{path}"], input=data, capture_output=True, timeout=60)
+    result = subprocess.run(
+        command + [f"https://{host}:{published or port}{path}"], input=data, capture_output=True, timeout=60,
+    )
     body, _, status = result.stdout.decode("utf-8", "replace").rpartition("\n")
     return int(status or 0), body
 
@@ -510,7 +518,7 @@ class StackTests(unittest.TestCase):
         self.assertEqual(mimir["acme-web"]["ingestion_rate"], 10000)
         self.assertIn("burst_size_bytes: 1048576", result["tempo"]["globex-edge"])
 
-    def test_10_only_the_gateway_is_published_and_on_loopback(self) -> None:
+    def published(self) -> list[tuple[str, str, int]]:
         output = compose("ps", "--format", "json").stdout
         published = []
         for line in output.splitlines():
@@ -519,7 +527,12 @@ class StackTests(unittest.TestCase):
                 for port in entry.get("Publishers") or []:
                     if port.get("PublishedPort"):
                         published.append((entry["Service"], port.get("URL"), port["PublishedPort"]))
-        self.assertEqual(published, [("traefik", "127.0.0.1", PORT)])
+        return sorted(published)
+
+    def test_10_only_the_gateway_is_published_and_on_loopback(self) -> None:
+        # The external entry point is selected in the document and still not published: only
+        # the override a deployment for another machine adds can publish it.
+        self.assertEqual(self.published(), [("traefik", "127.0.0.1", PORT)])
 
     def test_11_grafana_is_provisioned_reaches_data_through_the_gateway_and_reconciles_idempotently(self) -> None:
         platform = load_platform(CONFIG)
@@ -748,6 +761,50 @@ class StackTests(unittest.TestCase):
         # And an unchanged re-run does not touch Grafana again.
         again = compose("run", "--rm", "--no-deps", "grafana-init").stdout
         self.assertEqual(again.strip().splitlines()[-1], "no changes")
+
+    def test_17_external_entry_point_is_published_by_the_override_and_requires_a_client_certificate(self) -> None:
+        def restore() -> None:
+            EXTERNAL.clear()
+            bring_up()
+
+        self.addCleanup(restore)
+        EXTERNAL.update(external_bind_address=EXTERNAL_ADDRESS, external_published_port=EXTERNAL_PORT)
+        bring_up()
+        self.assertEqual(
+            self.published(), [("traefik", "127.0.0.1", PORT), ("traefik", EXTERNAL_ADDRESS, EXTERNAL_PORT)],
+        )
+        platform = load_platform(CONFIG)
+        external = quickstart.external_entry_point(platform)
+        # Issued the way a playbook does it, so a second request is not sent.
+        issued = SECRETS / "runtime" / "e2e-external-certificates"
+        client = vault.connect(platform)
+        first = trust.ensure_certificate(platform, issued, 2, client, 1, credential_id="globex-edge-ingest")
+        self.assertIsNotNone(first)
+        self.assertIsNone(trust.ensure_certificate(platform, issued, 2, client, 1, credential_id="globex-edge-ingest"))
+        certificate = issued / "globex-edge-ingest.crt.pem"
+        there = {"address": EXTERNAL_ADDRESS, "port": external.port, "published": EXTERNAL_PORT}
+        ingest = next(
+            item.id for item in platform.credentials
+            if (item.tenant, item.datastream, item.permission) == ("acme", "web", "ingest")
+        )
+
+        def accepted() -> int:
+            return push_log("globex-edge-ingest", "external-with-certificate", certificate=certificate, **there)
+
+        # With its certificate the credential delivers through the external entry point.
+        self.assertEqual(eventually(lambda: accepted() == 204 and 204, timeout=60), 204)
+        # Without one it is refused there, whatever the credential.
+        self.assertEqual(push_log("globex-edge-ingest", "external-without-certificate", **there), 403)
+        self.assertEqual(push_log(ingest, "external-certificate-free-credential", **there), 403)
+        # The same certificate-free credential still delivers on the loopback entry point.
+        self.assertEqual(push_log(ingest, "loopback-certificate-free-credential"), 204)
+        # And what arrived through the external entry point landed in its own datastream only.
+        self.assertTrue(eventually(lambda: query_logs("globex-edge-query", "external-with-certificate")[1], timeout=60))
+        own = next(
+            item.id for item in platform.credentials
+            if (item.tenant, item.datastream, item.permission) == ("acme", "web", "query")
+        )
+        self.assertEqual(query_logs(own, "external-with-certificate")[1], [])
 
 
 if __name__ == "__main__":

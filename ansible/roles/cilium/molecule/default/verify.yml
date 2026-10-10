@@ -1,0 +1,33 @@
+- name: The manifest pins the chart and carries this cluster's ranges
+  hosts: all
+  gather_facts: false
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  tasks:
+    - name: Read the manifest
+      ansible.builtin.slurp:
+        src: /var/lib/rancher/k3s/server/manifests/nighthawk-cilium.yaml
+      register: cilium_test_manifest
+
+    - name: Read its permissions
+      ansible.builtin.stat:
+        path: /var/lib/rancher/k3s/server/manifests/nighthawk-cilium.yaml
+      register: cilium_test_file
+
+    - name: It is the pinned chart with the declared pod range, MTU, and ports
+      ansible.builtin.assert:
+        that:
+          - cilium_test_chart.kind == 'HelmChart'
+          - cilium_test_chart.spec.chart == 'cilium'
+          - cilium_test_chart.spec.version | string == nighthawk.pins.cilium.version
+          - cilium_test_chart.spec.bootstrap
+          - cilium_test_values.ipam.operator.clusterPoolIPv4PodCIDRList == ['10.42.0.0/16']
+          - cilium_test_values.MTU == 1500
+          - cilium_test_values.tunnelPort == nighthawk.cluster.overlay_port
+          - cilium_test_values.k8sServicePort == nighthawk.cluster.api_port
+          - cilium_test_values.k8sServiceHost == groups['k3s_servers'] | first
+          - cilium_test_values.operator.replicas == 2
+          - cilium_test_file.stat.mode == '0600'
+      vars:
+        cilium_test_chart: "{{ cilium_test_manifest.content | b64decode | from_yaml }}"
+        cilium_test_values: "{{ (cilium_test_manifest.content | b64decode | from_yaml).spec.valuesContent | from_yaml }}"

@@ -7,8 +7,9 @@ one organization per customer.
 
 It is under construction. The Docker Compose profile runs end to end on one
 machine. The AWS infrastructure is written and tested as plans only. The
-Kubernetes workloads, host automation, dashboards, and alerting are not built
-yet.
+host and cluster automation (Ansible) is written and tested in containers,
+not on real machines. The Kubernetes workloads, dashboards, and alerting are
+not built yet.
 
 - **Try it locally:** [docs/00-quickstart.md](docs/00-quickstart.md). It needs
   a container runtime and starts a development HashiCorp Vault for secrets
@@ -17,6 +18,9 @@ yet.
   [docs/01-architecture.md](docs/01-architecture.md) and
   [docs/07-docker-compose.md](docs/07-docker-compose.md).
 - **Configuration and commands:** [docs/02-configuration.md](docs/02-configuration.md).
+- **Deploying to other machines:** [docs/08-ansible.md](docs/08-ansible.md):
+  hardening, firewall, a Docker host running the stack, a k3s cluster, and
+  collectors on external hosts.
 - **The plan and its amendments:** [Plan.md](Plan.md).
 - **Accepted behaviour, capability by capability:** [openspec/specs/](openspec/specs/).
 

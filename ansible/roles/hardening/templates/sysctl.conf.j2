@@ -1,0 +1,5 @@
+# Managed by the NightHawk hardening role, for a host with the role {{ nighthawk_host_role }}.
+# The values come from the rendered inputs; changes here are overwritten.
+{% for key, value in nighthawk.sysctl[nighthawk_host_role] | dictsort %}
+{{ key }} = {{ value }}
+{% endfor %}

@@ -1,0 +1,11 @@
+# Collections the automation uses, at the versions config/versions.yaml pins.
+# `python -m nighthawk check-pins` fails when this file and the matrix differ.
+# Install with: ansible-galaxy collection install -r requirements.yml -p .collections
+collections:
+  - name: ansible.posix
+    version: "2.2.2"
+  - name: community.general
+    version: "13.5.0"
+  # Used only by the role tests, through Molecule's Podman driver.
+  - name: containers.podman
+    version: "1.21.1"

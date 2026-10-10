@@ -215,7 +215,8 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "false"
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_SERVER_DOMAIN: ${NIGHTHAWK_GRAFANA_HOSTNAME:?}
-      GF_SERVER_ROOT_URL: https://${NIGHTHAWK_GRAFANA_HOSTNAME:?}:${NIGHTHAWK_GATEWAY_PORT:?}/
+      # The port people open the UI on: the external one when it is published, else the loopback one.
+      GF_SERVER_ROOT_URL: https://${NIGHTHAWK_GRAFANA_HOSTNAME:?}:${NIGHTHAWK_GRAFANA_PORT:-${NIGHTHAWK_GATEWAY_PORT:?}}/
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
       GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"

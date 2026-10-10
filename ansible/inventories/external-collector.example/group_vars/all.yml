@@ -1,0 +1,24 @@
+# The file `python -m nighthawk render-contracts` wrote: <output>/ansible/nighthawk.yml.
+nighthawk_inputs_file: /absolute/path/to/contracts/ansible/nighthawk.yml
+nighthawk_host_role: collector_host
+
+ansible_user: deploy
+ansible_become: true
+
+# What `python -m nighthawk render-collector --profile vm --entry-point remote-gateway` wrote.
+alloy_collector_rendered_dir: /absolute/path/to/collector-vm
+# From `python -m nighthawk materialize-secrets`: the ingestion credential of the datastream.
+alloy_collector_credential_file: /absolute/path/to/.materialized-secrets/kv/nighthawk/local/example-ingest
+# The certificate authority the gateway's server certificate is signed by:
+# `vault read -field=certificate <pki mount>/cert/ca`, or runtime/gateway/client-ca.pem of a
+# rendered deployment.
+alloy_collector_gateway_ca_file: /absolute/path/to/gateway-ca.pem
+
+# The client certificate. It is issued on this machine by `issue-certificate --if-needed`, and
+# again when it has fewer than the renewal days left or its authority was replaced. The Vault
+# credential is read from VAULT_TOKEN or the token file, never from this inventory.
+alloy_collector_platform_config: /absolute/path/to/platform.yaml
+alloy_collector_credential_id: example-ingest
+alloy_collector_certificate_dir: /absolute/path/to/collector-certificates
+alloy_collector_certificate_valid_days: 90
+alloy_collector_renew_before_days: 30

@@ -1,0 +1,15 @@
+galaxy_info:
+  role_name: docker_engine
+  namespace: nighthawk
+  author: NightHawk
+  description: Install the pinned Docker Engine from a repository whose signing key is verified.
+  license: Proprietary
+  min_ansible_version: "2.21"
+  platforms:
+    - name: Ubuntu
+      versions: [jammy, noble]
+    - name: Debian
+      versions: [bookworm]
+    - name: EL
+      versions: ["9"]
+dependencies: []

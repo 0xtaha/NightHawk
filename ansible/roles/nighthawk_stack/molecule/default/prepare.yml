@@ -1,0 +1,83 @@
+# A stand-in for what `render-docker-deployment` writes on the control machine: the same
+# layout and the same manifest keys, with made-up content.
+- name: Write a rendered deployment on the control machine
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    nighthawk_stack_test_root: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/deployment"
+    nighthawk_stack_test_manifest:
+      project: nighthawk
+      source_archive: source.tar
+      compose_files: [docker-compose/docker-compose.yaml, docker-compose/docker-compose.external.yaml]
+      build_service: authz
+      profiles: []
+      teardown_profiles: [sample, tools, host-collection]
+      waited_services: [grafana, alloy]
+      wait_service: wait-alloy
+      wait_timeout: 300
+      reload_signal: HUP
+      reloads:
+        - {service: authz, rendered: [], secrets: [runtime/authz]}
+        - {service: alloy, rendered: [collector], secrets: [runtime/collector]}
+      provision: [grafana-init]
+      notice: "This is a single node without high availability: if that machine is lost, so is its telemetry."
+  tasks:
+    - name: Start from nothing
+      ansible.builtin.file:
+        path: "{{ nighthawk_stack_test_root }}"
+        state: absent
+
+    - name: Create the directories
+      ansible.builtin.file:
+        path: "{{ nighthawk_stack_test_root }}/{{ item.path }}"
+        state: directory
+        mode: "{{ item.mode }}"
+      loop:
+        - {path: rendered/collector, mode: "0755"}
+        - {path: rendered/contracts, mode: "0755"}
+        - {path: source/docker-compose, mode: "0755"}
+        - {path: secrets, mode: "0700"}
+        - {path: secrets/kv/nighthawk/local, mode: "0700"}
+        - {path: secrets/runtime/authz, mode: "0700"}
+        - {path: secrets/runtime/collector, mode: "0700"}
+        # Mounted even when it holds nothing, so it must reach the host empty.
+        - {path: secrets/runtime/storage-trust, mode: "0700"}
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: Write the files
+      ansible.builtin.copy:
+        content: "{{ item.content }}"
+        dest: "{{ nighthawk_stack_test_root }}/{{ item.path }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - path: rendered/compose.env
+          mode: "0644"
+          content: |
+            COMPOSE_PROJECT_NAME=nighthawk
+            NIGHTHAWK_RENDERED_DIR=/opt/nighthawk/rendered
+            NIGHTHAWK_SECRETS_DIR=/opt/nighthawk/secrets
+            NIGHTHAWK_UID=2001
+            NIGHTHAWK_GID=2002
+            NIGHTHAWK_EXTERNAL_BIND_ADDRESS=192.0.2.10
+        - {path: rendered/deployment.json, mode: "0644", content: "{{ nighthawk_stack_test_manifest | to_nice_json }}\n"}
+        - {path: rendered/collector/config.alloy, mode: "0644", content: "// collector configuration\n"}
+        - {path: rendered/contracts/kept.yaml, mode: "0644", content: "kept: true\n"}
+        - {path: rendered/contracts/dropped.yaml, mode: "0644", content: "dropped: later\n"}
+        - {path: source/requirements.txt, mode: "0644", content: "PyYAML\n"}
+        - {path: source/docker-compose/docker-compose.yaml, mode: "0644", content: "services: {}\n"}
+        - {path: secrets/kv/nighthawk/local/grafana-admin, mode: "0600", content: "not-a-real-password\n"}
+        - {path: secrets/runtime/authz/policy.json, mode: "0600", content: "{\"version\": 1}\n"}
+        - {path: secrets/runtime/collector/credential, mode: "0600", content: "not-a-real-credential\n"}
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: Pack the image source as the renderer does
+      community.general.archive:
+        path:
+          - "{{ nighthawk_stack_test_root }}/source/requirements.txt"
+          - "{{ nighthawk_stack_test_root }}/source/docker-compose"
+        dest: "{{ nighthawk_stack_test_root }}/rendered/source.tar"
+        format: tar
+        mode: "0644"

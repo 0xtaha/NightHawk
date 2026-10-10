@@ -1,0 +1,33 @@
+nighthawk_inputs_file: /absolute/path/to/contracts/ansible/nighthawk.yml
+
+ansible_user: deploy
+ansible_become: true
+
+firewall_admin_allowlist:
+  - 198.51.100.0/24
+firewall_rollback_minutes: 5
+hardening_automatic_security_updates: false
+
+# `development`: exactly one node. `production`: an odd number of at least three servers and
+# at least three storage nodes.
+k3s_cluster_shape: production
+
+# Pod and service ranges must not overlap each other or the nodes' own network.
+k3s_node_network: 192.0.2.0/24
+k3s_pod_cidr: 10.42.0.0/16
+k3s_service_cidr: 10.43.0.0/16
+# MTU of the interface the nodes reach each other on. It must be the same on every node.
+k3s_node_mtu: 1500
+
+# Addresses the load balancer will hand out once it is installed in phase 6. Checked now so
+# an impossible pool is found before the cluster exists: inside the node network, no node in it.
+k3s_load_balancer_pool:
+  - 192.0.2.200-192.0.2.220
+
+# Where `python -m nighthawk materialize-secrets` wrote the secrets on this machine, and the
+# secret reference of the join token in the platform document.
+nighthawk_secrets_dir: /absolute/path/to/.materialized-secrets
+k3s_join_token_file: /absolute/path/to/.materialized-secrets/kv/nighthawk/cluster/join-token
+
+# Set to a path on this machine to copy the administrative kubeconfig there, owner-only.
+k3s_fetch_kubeconfig_to: ""

@@ -1,0 +1,18 @@
+# Facts are gathered from two Ubuntu containers and judged on the control machine. A container
+# is not a node a cluster could run on, so the scenario declares a layout that must be
+# refused and checks that it is, with every node stopped and nothing changed.
+scenario:
+  name: default
+platforms:
+  - name: nh-ubuntu-2204
+    image: localhost/nighthawk-test/ubuntu:22.04
+    pre_build_image: true
+    systemd: always
+    command: /lib/systemd/systemd
+    groups: [k3s_servers]
+  - name: nh-ubuntu-2404
+    image: localhost/nighthawk-test/ubuntu:24.04
+    pre_build_image: true
+    systemd: always
+    command: /lib/systemd/systemd
+    groups: [k3s_agents]

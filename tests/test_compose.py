@@ -88,6 +88,37 @@ class ComposeTests(unittest.TestCase):
         self.assertNotIn("8443", text)
         self.assertEqual(self.services["grafana"]["environment"]["GF_SERVER_ROOT_URL"], "https://grafana.test:9443/")
 
+    def test_external_override_publishes_the_external_entry_point_on_a_stated_address(self) -> None:
+        override = COMPOSE_DIR / "docker-compose.external.yaml"
+        environment = {**ENVIRONMENT, "NIGHTHAWK_SECRETS_DIR": self.secrets, "NIGHTHAWK_EXTERNAL_PORT": "443"}
+
+        def config(extra: dict) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                ["docker", "compose", "--file", str(BASE), "--file", str(override), "--profile", "*", "config", "--format", "json"],
+                capture_output=True, text=True, env={**os.environ, **environment, **extra}, timeout=60,
+            )
+
+        # No address: the configuration does not resolve.
+        missing = config({})
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("NIGHTHAWK_EXTERNAL_BIND_ADDRESS", missing.stderr)
+        resolved = config({"NIGHTHAWK_EXTERNAL_BIND_ADDRESS": "192.0.2.10"})
+        self.assertEqual(resolved.returncode, 0, resolved.stderr)
+        services = yaml.safe_load(resolved.stdout)["services"]
+        published = {name: service["ports"] for name, service in services.items() if service.get("ports")}
+        self.assertEqual(list(published), ["traefik"])
+        ports = sorted((port["host_ip"], str(port["published"]), port["target"]) for port in published["traefik"])
+        # The loopback entry point is exactly where it was; the external one is added beside it.
+        self.assertEqual(ports, [("127.0.0.1", "9443", 9443), ("192.0.2.10", "443", 443)])
+        other_port = config({"NIGHTHAWK_EXTERNAL_BIND_ADDRESS": "192.0.2.10", "NIGHTHAWK_EXTERNAL_PUBLISHED_PORT": "8444"})
+        ports = yaml.safe_load(other_port.stdout)["services"]["traefik"]["ports"]
+        self.assertIn(("192.0.2.10", "8444", 443), [(port["host_ip"], str(port["published"]), port["target"]) for port in ports])
+
+    def test_without_the_override_only_the_loopback_entry_point_is_published(self) -> None:
+        (port,) = self.services["traefik"]["ports"]
+        self.assertEqual(port["host_ip"], "127.0.0.1")
+        self.assertNotIn("EXTERNAL", BASE.read_text(encoding="utf-8"))
+
     def test_grafana_provisioning_takes_appended_options(self) -> None:
         service = self.services["grafana-init"]
         self.assertEqual(service["entrypoint"][:4], ["python", "-m", "nighthawk", "provision-grafana"])

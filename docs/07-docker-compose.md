@@ -15,6 +15,16 @@ production hardening are not verified.
 To start it, see the [quickstart](00-quickstart.md). This document explains
 what the quickstart builds.
 
+The same stack can be deployed to another machine as a production single
+node, still without high availability: see
+[Docker host deployment](08-ansible.md#docker-host-deployment). There the
+configuration is rendered on a control machine and copied, and an extra
+Compose file, `docker-compose/docker-compose.external.yaml`, publishes the
+certificate-requiring external entry point on an address the operator
+states. That file needs `NIGHTHAWK_EXTERNAL_BIND_ADDRESS` and does not
+resolve without it. The local quickstart never uses it, so it publishes on
+loopback only.
+
 ## Layout
 
 `docker-compose/docker-compose.yaml` is static. Nothing tenant-specific is in
@@ -249,7 +259,7 @@ against a stack started from `tests/e2e/platform.yaml` (two customers, two
 datastreams each), with secrets and certificates from HashiCorp Vault 2.1.2
 in dev mode.
 
-All 18 cases passed. The suite starts its own dev-mode Vault from the pinned
+All 19 cases passed. The suite starts its own dev-mode Vault from the pinned
 image (container `nighthawk-e2e-vault`, loopback port 8210 or
 `NIGHTHAWK_E2E_VAULT_PORT`) and bootstraps it, starts its own stack, runs
 these, and purges both afterwards. It takes about ten minutes.
@@ -272,6 +282,7 @@ in its failure message.
 | Recreated Vault | With the stack's volumes present, the dev-mode Vault was replaced by a new, bootstrapped one. The quickstart stopped before generating anything, named the four storage identities and the seven volumes, and wrote nothing to Vault. After `teardown-docker --purge --yes` it generated everything again and issued certificates from the new authority |
 | Credential handling | The Vault token appeared in no file the quickstart wrote and in no container's environment |
 | Client certificates | A certificate-bound credential was accepted with its Vault-signed certificate and refused without it. A forged `X-Forwarded-Tls-Client-Cert` header, in three spellings including the underscore alias, was refused |
+| External entry point | With `docker-compose.external.yaml` added, the gateway also published its certificate-requiring entry point on a second loopback address (`127.0.0.2`, an unprivileged port standing in for 443). Ingestion there was accepted with the credential's client certificate and refused with 403 without one, for a certificate-bound credential and for a certificate-free one alike; the same certificate-free credential still delivered on the loopback entry point, and the data landed in its own datastream only. Without the override only the loopback entry point was published. This is the one part of a deployment to another machine observed here |
 | Revocation | After revoking a certificate in Vault with `revoke-certificate`, listing the fingerprint it printed, and re-running the quickstart, that certificate was refused and a second certificate for the same identity still worked, with no restart |
 | gRPC | An OTLP gRPC trace export through the gateway returned `grpc-status: 0` and the trace was queryable. A query credential got 403 and no credential got 401 on the same path |
 | Backends | Mimir, Loki, Tempo, and Pyroscope, addressed directly on the private network without a tenant, returned 401; Pyroscope answered the same request with a tenant. Mimir, Tempo, and Pyroscope reported the rendered retention of every datastream for their signal (ten values), including one datastream whose four signals declare four different retentions |

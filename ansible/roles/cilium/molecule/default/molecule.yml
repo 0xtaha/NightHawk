@@ -1,0 +1,17 @@
+# The manifest is placed on k3s servers, which are Ubuntu only. Nothing applies it here:
+# there is no cluster. What is tested is the manifest k3s would apply.
+scenario:
+  name: default
+platforms:
+  - name: nh-ubuntu-2204
+    image: localhost/nighthawk-test/ubuntu:22.04
+    pre_build_image: true
+    systemd: always
+    command: /lib/systemd/systemd
+    groups: [k3s_servers]
+  - name: nh-ubuntu-2404
+    image: localhost/nighthawk-test/ubuntu:24.04
+    pre_build_image: true
+    systemd: always
+    command: /lib/systemd/systemd
+    groups: [k3s_servers]

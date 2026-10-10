@@ -1,0 +1,4 @@
+nighthawk_host_role: cluster_server
+# Disks this node offers to the storage add-on phase 6 installs. One node needs none in the
+# development shape; list a whole, unused block device to have it checked.
+k3s_storage_disks: []

@@ -1,0 +1,4 @@
+# Uses every platform from ansible/molecule/base.yml. The collector really runs here, as its
+# own account under its unit; it has no gateway to deliver to, which it tolerates.
+scenario:
+  name: default

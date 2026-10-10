@@ -1,0 +1,6 @@
+# The interface the nodes reach each other on. Its address and MTU are what the layout check sees.
+k3s_prerequisites_interface: "{{ k3s_node_interface | default(ansible_facts['default_ipv4']['interface']) }}"
+k3s_prerequisites_python: python3
+k3s_prerequisites_repository_dir: "{{ playbook_dir }}/../.."
+# Every node of the cluster, servers first.
+k3s_prerequisites_nodes: "{{ (groups['k3s_servers'] | default([])) + (groups['k3s_agents'] | default([])) }}"

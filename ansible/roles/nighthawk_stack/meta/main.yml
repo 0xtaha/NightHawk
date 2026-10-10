@@ -1,0 +1,15 @@
+galaxy_info:
+  role_name: nighthawk_stack
+  namespace: nighthawk
+  author: NightHawk
+  description: Deploys a rendered NightHawk Compose stack to a prepared Docker host.
+  license: Proprietary
+  min_ansible_version: "2.21"
+  platforms:
+    - name: Ubuntu
+      versions: [jammy, noble]
+    - name: Debian
+      versions: [bookworm]
+    - name: EL
+      versions: ["9"]
+dependencies: []

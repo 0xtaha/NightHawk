@@ -275,6 +275,8 @@ class Platform:
     secrets: dict[str, SecretReference]
     streams: tuple[Stream, ...]
     credentials: tuple[Credential, ...]
+    # Only a self-hosted Kubernetes deployment has a cluster of its own to join nodes to.
+    cluster_join_token_secret_ref: str | None = None
 
     def manifest(self) -> dict:
         return asdict(self)
@@ -574,11 +576,20 @@ def load_platform(
     _require_secret(grafana.admin_secret_ref, secrets, "grafana")
     if grafana.admin_secret_ref in used_secrets | storage_refs | trust_refs:
         raise ConfigurationError("grafana: admin_secret_ref must not reuse another secret")
+    join_token_ref = None
+    if "cluster" in data:
+        if deployment != "self-hosted-k8s":
+            raise ConfigurationError(f"cluster: only a self-hosted-k8s deployment has a cluster join token, not {deployment}")
+        join_token_ref = string(mapping(data["cluster"])["join_token_secret_ref"])
+        _require_secret(join_token_ref, secrets, "cluster")
+        if join_token_ref in used_secrets | storage_refs | trust_refs | {grafana.admin_secret_ref}:
+            raise ConfigurationError("cluster: join_token_secret_ref must not reuse another secret")
     profile = string(data["profile"])
     return Platform(
         2, deployment, profile, _vault(mapping(data["vault"]), profile), gateway, grafana, provider, bindings, secrets,
         tuple(sorted(streams, key=lambda stream: (stream.tenant, stream.datastream))),
         tuple(sorted(credentials, key=lambda credential: credential.id)),
+        join_token_ref,
     )
 
 
@@ -632,9 +643,31 @@ def chart_version_problems(matrix: dict) -> list[str]:
     return problems
 
 
+def supported_architectures(matrix: dict) -> list[str]:
+    """Every architecture some supported operating system entry lists."""
+    return sorted({
+        string(architecture)
+        for entries in mapping(matrix["os_support"]).values() for entry in sequence(entries)
+        for architecture in sequence(mapping(entry)["architectures"])
+    })
+
+
+def artifact_checksum_problems(matrix: dict) -> list[str]:
+    """Host-installed binaries that lack a checksum for an architecture the matrix supports."""
+    problems: list[str] = []
+    for name, artifact in sorted(mapping(matrix["host_artifacts"]).items()):
+        checksums = mapping(artifact).get("sha256")
+        if checksums is None:
+            continue
+        for architecture in supported_architectures(matrix):
+            if f"linux_{architecture}" not in mapping(checksums):
+                problems.append(f"host_artifacts.{name} has no checksum for linux_{architecture}, a supported architecture")
+    return problems
+
+
 def load_versions(path: Path = ROOT / "config" / "versions.yaml") -> dict:
     matrix = load_document(path, "versions.schema.json")
-    problems = chart_version_problems(matrix)
+    problems = chart_version_problems(matrix) + artifact_checksum_problems(matrix)
     if problems:
         raise ConfigurationError(f"{path}:\n" + "\n".join(problems))
     vault = mapping(mapping(matrix["secrets_store"])["vault"])

@@ -1,0 +1,50 @@
+# The version and the archive checksums come from the rendered inputs, never from this role.
+alloy_collector_download_base: https://github.com/grafana/alloy/releases/download
+alloy_collector_architecture: >-
+  {{ {'x86_64': 'amd64', 'aarch64': 'arm64'}.get(ansible_facts['architecture'], ansible_facts['architecture']) }}
+alloy_collector_version: "{{ nighthawk.pins.alloy.version }}"
+alloy_collector_checksum: "{{ nighthawk.pins.alloy.sha256['linux_' ~ alloy_collector_architecture] }}"
+alloy_collector_archive: "alloy-linux-{{ alloy_collector_architecture }}.zip"
+
+alloy_collector_user: alloy
+alloy_collector_install_dir: /opt/nighthawk-alloy
+alloy_collector_binary: /usr/local/bin/nighthawk-alloy
+alloy_collector_config_dir: /etc/nighthawk-alloy
+# The only directory the service can write to: its write-ahead log and positions.
+alloy_collector_state_dir: /var/lib/nighthawk-alloy
+alloy_collector_unit: nighthawk-alloy.service
+# Alloy's own status page. Loopback only; it is not a network rule.
+alloy_collector_listen_address: 127.0.0.1:12345
+# Groups that let the collector read the journal and /var/log, where they exist.
+alloy_collector_read_groups: [systemd-journal, adm]
+# Further [Service] lines, one per entry, for example `PrivateDevices=true` or
+# `ProtectKernelTunables=true`. The unit's own confinement is the set that the role tests start
+# on every supported system; these two examples need a capability an unprivileged test
+# container does not have, so they are left to the operator.
+alloy_collector_unit_extra_lines: []
+# Start the service and enable it at boot.
+alloy_collector_manage_service: true
+
+# On the control machine. The configuration is what `render-collector` wrote; the credential
+# and the gateway's authority come from `materialize-secrets` and `render-contracts`.
+alloy_collector_rendered_dir: ""
+alloy_collector_credential_file: ""
+alloy_collector_gateway_ca_file: ""
+# The client certificate is issued, and re-issued when it is close to expiry or its authority
+# was replaced, by `issue-certificate --if-needed` on the control machine. That command reads
+# the Vault credential from the environment or a token file, as every NightHawk command does.
+alloy_collector_issue_certificate: true
+alloy_collector_credential_id: ""
+alloy_collector_certificate_dir: ""
+# Required when a certificate is issued; there is no default validity.
+alloy_collector_certificate_valid_days: null
+alloy_collector_renew_before_days: null
+alloy_collector_platform_config: ""
+alloy_collector_python: python3
+alloy_collector_repository_dir: "{{ playbook_dir }}/../.."
+
+alloy_collector_secret_files:
+  credential: "{{ alloy_collector_credential_file }}"
+  gateway-ca.pem: "{{ alloy_collector_gateway_ca_file }}"
+  client.crt.pem: "{{ alloy_collector_certificate_dir }}/{{ alloy_collector_credential_id }}.crt.pem"
+  client.key.pem: "{{ alloy_collector_certificate_dir }}/{{ alloy_collector_credential_id }}.key.pem"

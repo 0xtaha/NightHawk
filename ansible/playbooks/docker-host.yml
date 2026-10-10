@@ -1,0 +1,20 @@
+# Prepare a Docker host and deploy the NightHawk stack to it. See docs/08-ansible.md.
+- name: Check every Docker host before changing any
+  hosts: docker_hosts
+  gather_facts: true
+  any_errors_fatal: true
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  roles:
+    - role: preflight
+
+- name: Prepare the hosts and deploy the stack
+  hosts: docker_hosts
+  gather_facts: true
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  roles:
+    - role: hardening
+    - role: firewall
+    - role: docker_engine
+    - role: nighthawk_stack

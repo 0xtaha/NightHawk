@@ -1,0 +1,16 @@
+# k3s nodes are Ubuntu only. k3s itself is not started: it needs a real kernel and cgroups.
+scenario:
+  name: default
+platforms:
+  - name: nh-ubuntu-2204
+    image: localhost/nighthawk-test/ubuntu:22.04
+    pre_build_image: true
+    systemd: always
+    command: /lib/systemd/systemd
+    groups: [k3s_servers]
+  - name: nh-ubuntu-2404
+    image: localhost/nighthawk-test/ubuntu:24.04
+    pre_build_image: true
+    systemd: always
+    command: /lib/systemd/systemd
+    groups: [k3s_agents]

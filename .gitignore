@@ -22,3 +22,8 @@ secrets/
 !*.example
 .tools/
 .materialized-secrets-e2e/
+# Ansible collections installed from ansible/requirements.yml, and Molecule state.
+ansible/.collections/
+.molecule/
+.ansible/
+ansible/molecule/.rendered/

@@ -1,0 +1,188 @@
+- name: The verified binary, the configuration, and the unit are in place
+  hosts: all
+  gather_facts: false
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  vars:
+    k3s_node_test_server: "{{ inventory_hostname in groups['k3s_servers'] }}"
+  tasks:
+    - name: Read the binary
+      ansible.builtin.stat:
+        path: /usr/local/bin/k3s
+        checksum_algorithm: sha256
+      register: k3s_node_test_binary
+
+    - name: Ask it for its version
+      ansible.builtin.command:
+        cmd: /usr/local/bin/k3s --version
+      register: k3s_node_test_version
+      changed_when: false
+
+    - name: Read the configuration
+      ansible.builtin.slurp:
+        src: /etc/rancher/k3s/config.yaml
+      register: k3s_node_test_config
+
+    - name: Read the files' permissions
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /etc/rancher/k3s/join-token
+        - /etc/rancher/k3s/config.yaml
+        - "/etc/systemd/system/{{ 'k3s.service' if k3s_node_test_server else 'k3s-agent.service' }}"
+        - "/etc/systemd/system/{{ 'k3s-agent.service' if k3s_node_test_server else 'k3s.service' }}"
+      register: k3s_node_test_files
+
+    - name: Read the unit
+      ansible.builtin.slurp:
+        src: "/etc/systemd/system/{{ 'k3s.service' if k3s_node_test_server else 'k3s-agent.service' }}"
+      register: k3s_node_test_unit
+
+    - name: The pinned binary is installed and the secrets are root-only
+      ansible.builtin.assert:
+        that:
+          - k3s_node_test_binary.stat.checksum in nighthawk.pins.k3s.sha256.values()
+          - "'v' ~ nighthawk.pins.k3s.version in k3s_node_test_version.stdout"
+          - k3s_node_test_files.results[0].stat.mode == '0600'
+          - k3s_node_test_files.results[1].stat.mode == '0600'
+          - k3s_node_test_files.results[2].stat.exists
+          - not k3s_node_test_files.results[3].stat.exists
+          - "('ExecStart=/usr/local/bin/k3s ' ~ ('server' if k3s_node_test_server else 'agent')) in k3s_node_test_unit.content | b64decode"
+
+    - name: The server runs without the bundled network plugin, ingress controller, and load balancer
+      ansible.builtin.assert:
+        that:
+          - k3s_node_test_settings['flannel-backend'] == 'none'
+          - k3s_node_test_settings['disable-network-policy']
+          - k3s_node_test_settings['disable'] | sort == ['servicelb', 'traefik']
+          - k3s_node_test_settings['secrets-encryption']
+          - k3s_node_test_settings['cluster-init']
+          - k3s_node_test_settings['cluster-cidr'] == '10.42.0.0/16'
+          - k3s_node_test_settings['service-cidr'] == '10.43.0.0/16'
+          - k3s_node_test_settings['write-kubeconfig-mode'] == '0600'
+          - "'server' not in k3s_node_test_settings"
+      vars:
+        k3s_node_test_settings: "{{ k3s_node_test_config.content | b64decode | from_yaml }}"
+      when: k3s_node_test_server
+
+    - name: The agent joins the first server with the token file and carries no server setting
+      ansible.builtin.assert:
+        that:
+          - k3s_node_test_settings['server'] == 'https://' ~ (groups['k3s_servers'] | first) ~ ':' ~ nighthawk.cluster.api_port
+          - k3s_node_test_settings['token-file'] == '/etc/rancher/k3s/join-token'
+          - k3s_node_test_settings.keys() | sort == ['node-ip', 'server', 'token-file']
+      vars:
+        k3s_node_test_settings: "{{ k3s_node_test_config.content | b64decode | from_yaml }}"
+      when: not k3s_node_test_server
+
+- name: A binary with another checksum installs nothing
+  hosts: all
+  gather_facts: true
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  vars:
+    k3s_join_token_file: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/join-token"
+    k3s_node_manage_service: false
+    k3s_node_checksum: "0000000000000000000000000000000000000000000000000000000000000000"
+    k3s_node_binary: /usr/local/bin/refused-k3s
+    k3s_node_config_dir: /etc/refused-k3s
+    # A small stand-in for the binary: what matters is that its checksum is not the pinned one.
+    k3s_node_download_base: file:///tmp/refused-download
+    k3s_cluster_shape: production
+    k3s_node_network: 192.0.2.0/24
+    k3s_pod_cidr: 10.42.0.0/16
+    k3s_service_cidr: 10.43.0.0/16
+    k3s_node_mtu: 1500
+    k3s_load_balancer_pool: [192.0.2.200-192.0.2.220]
+  tasks:
+    - name: Create the stand-in download location
+      ansible.builtin.file:
+        path: "/tmp/refused-download/v{{ nighthawk.pins.k3s.version }}"
+        state: directory
+        mode: "0755"
+
+    - name: Write the stand-in binary
+      ansible.builtin.copy:
+        content: "not the pinned binary\n"
+        dest: "/tmp/refused-download/v{{ nighthawk.pins.k3s.version }}/{{ item }}"
+        mode: "0755"
+      loop: [k3s, k3s-arm64]
+
+    - name: Install with a checksum the binary does not have
+      block:
+        - name: Run the role
+          ansible.builtin.include_role:
+            name: k3s_node
+
+        - name: This must not be reached
+          ansible.builtin.fail:
+            msg: A binary with another checksum was installed.
+      rescue:
+        - name: It named the artifact and installed nothing
+          ansible.builtin.assert:
+            that:
+              - "'k3s' in ansible_failed_result.msg"
+              - "'Nothing was installed' in ansible_failed_result.msg"
+
+    - name: Look for what it left
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /usr/local/bin/refused-k3s
+        - /etc/refused-k3s
+      register: k3s_node_test_left
+
+    - name: Neither the binary nor any configuration is there
+      ansible.builtin.assert:
+        that: not (k3s_node_test_left.results | map(attribute='stat.exists') | max)
+
+- name: A node that runs another version is not changed
+  hosts: all
+  gather_facts: true
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  vars:
+    k3s_join_token_file: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/join-token"
+    k3s_node_manage_service: false
+    k3s_node_binary: /usr/local/bin/other-k3s
+    k3s_node_config_dir: /etc/other-k3s
+    k3s_cluster_shape: production
+    k3s_node_network: 192.0.2.0/24
+    k3s_pod_cidr: 10.42.0.0/16
+    k3s_service_cidr: 10.43.0.0/16
+    k3s_node_mtu: 1500
+    k3s_load_balancer_pool: [192.0.2.200-192.0.2.220]
+  tasks:
+    - name: Plant a k3s that reports another version
+      ansible.builtin.copy:
+        content: |
+          #!/bin/sh
+          echo "k3s version v1.0.0+k3s1 (00000000)"
+        dest: /usr/local/bin/other-k3s
+        mode: "0755"
+
+    - name: Apply the role and expect a refusal
+      block:
+        - name: Run the role
+          ansible.builtin.include_role:
+            name: k3s_node
+
+        - name: This must not be reached
+          ansible.builtin.fail:
+            msg: A different running version was replaced without being asked.
+      rescue:
+        - name: It stated both versions and changed nothing
+          ansible.builtin.assert:
+            that:
+              - "'v1.0.0+k3s1' in ansible_failed_result.msg"
+              - nighthawk.pins.k3s.version in ansible_failed_result.msg
+              - "'Nothing was changed' in ansible_failed_result.msg"
+
+    - name: Read the planted file
+      ansible.builtin.slurp:
+        src: /usr/local/bin/other-k3s
+      register: k3s_node_test_planted
+
+    - name: It is still the planted one
+      ansible.builtin.assert:
+        that: "'v1.0.0+k3s1' in k3s_node_test_planted.content | b64decode"

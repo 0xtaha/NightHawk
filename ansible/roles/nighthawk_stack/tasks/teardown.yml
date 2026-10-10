@@ -1,0 +1,53 @@
+# Stops and removes the stack's containers and networks. Volumes, secret files, and
+# certificates are kept unless a purge is confirmed with this host's inventory name.
+- name: Refuse a purge that is not confirmed by name
+  ansible.builtin.assert:
+    that: not (nighthawk_stack_purge | bool) or nighthawk_stack_purge_confirm == inventory_hostname
+    fail_msg: >-
+      A purge deletes all telemetry, secret files, and certificates stored on {{ inventory_hostname }}.
+      Confirm it with `-e nighthawk_stack_purge_confirm={{ inventory_hostname }}`. Nothing was deleted.
+    quiet: true
+
+- name: Read the manifest of what is deployed
+  ansible.builtin.slurp:
+    src: "{{ nighthawk_stack_rendered_target }}/deployment.json"
+  register: nighthawk_stack_deployed
+  failed_when: false
+
+- name: Stop when nothing is deployed here
+  ansible.builtin.assert:
+    that: nighthawk_stack_deployed.content is defined
+    fail_msg: "{{ nighthawk_stack_rendered_target }}/deployment.json not found on {{ inventory_hostname }}; nothing to tear down."
+    quiet: true
+
+- name: Take the manifest
+  ansible.builtin.set_fact:
+    nighthawk_stack_manifest: "{{ nighthawk_stack_deployed.content | b64decode | from_json }}"
+
+- name: Stop and remove the containers and networks
+  ansible.builtin.command:
+    argv: >-
+      {{ nighthawk_stack_compose
+         + (nighthawk_stack_manifest.teardown_profiles | map('regex_replace', '^', '--profile=') | list)
+         + ['down', '--remove-orphans'] + (['--volumes'] if nighthawk_stack_purge | bool else []) }}
+  register: nighthawk_stack_down
+  changed_when: nighthawk_stack_down.stderr is search('(Removed|Stopped)')
+  when: nighthawk_stack_start | bool
+
+- name: Delete the stack's files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ nighthawk_stack_secrets_target }}"
+    - "{{ nighthawk_stack_rendered_target }}"
+    - "{{ nighthawk_stack_source_target }}"
+    - "{{ nighthawk_stack_source_target }}.sha256"
+  when: nighthawk_stack_purge | bool
+
+- name: Say what was kept
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Deleted all NightHawk volumes, secret files, and certificates on ' ~ inventory_hostname ~ '.'
+         if nighthawk_stack_purge | bool
+         else 'Removed the NightHawk containers on ' ~ inventory_hostname ~ '. Volumes, secret files, and certificates were kept.' }}

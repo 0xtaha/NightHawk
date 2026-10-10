@@ -1,0 +1,75 @@
+# Password authentication is only turned off for an account that demonstrably has a key, and
+# the new configuration only takes effect after sshd itself accepts it.
+- name: Find the account that administers this host
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ hardening_ssh_user }}"
+
+- name: Read that account's authorized keys
+  ansible.builtin.slurp:
+    src: "{{ ansible_facts['getent_passwd'][hardening_ssh_user][4] }}/.ssh/authorized_keys"
+  register: hardening_authorized_keys
+  failed_when: false
+
+- name: Refuse to disable password authentication without a key
+  ansible.builtin.assert:
+    that:
+      - hardening_authorized_keys.content is defined
+      - >-
+        hardening_authorized_keys.content | b64decode | split('\n')
+        | select('match', '^\s*(ssh-|ecdsa-|sk-)') | list | length > 0
+    fail_msg: >-
+      {{ hardening_ssh_user }} has no authorized SSH key on {{ inventory_hostname }}. Disabling password
+      authentication would lock this account out, so the SSH configuration was not changed.
+    quiet: true
+
+- name: Ensure the main configuration reads the fragment directory
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    line: Include /etc/ssh/sshd_config.d/*.conf
+    insertbefore: BOF
+    state: present
+
+- name: Keep the current fragment in case the new one is refused
+  ansible.builtin.slurp:
+    src: "{{ hardening_sshd_fragment }}"
+  register: hardening_previous_fragment
+  failed_when: false
+
+- name: Apply the SSH settings and have sshd validate the whole configuration
+  block:
+    - name: Write the SSH settings
+      ansible.builtin.template:
+        src: sshd-fragment.conf.j2
+        dest: "{{ hardening_sshd_fragment }}"
+        owner: root
+        group: root
+        mode: "0600"
+      notify: Reload sshd
+
+    - name: Validate the resulting configuration
+      ansible.builtin.command:
+        cmd: sshd -t
+      changed_when: false
+      check_mode: false
+  rescue:
+    - name: Restore the previous fragment
+      ansible.builtin.copy:
+        content: "{{ hardening_previous_fragment.content | b64decode }}"
+        dest: "{{ hardening_sshd_fragment }}"
+        owner: root
+        group: root
+        mode: "0600"
+      when: hardening_previous_fragment.content is defined
+
+    - name: Remove the refused fragment
+      ansible.builtin.file:
+        path: "{{ hardening_sshd_fragment }}"
+        state: absent
+      when: hardening_previous_fragment.content is not defined
+
+    - name: Stop without reloading sshd
+      ansible.builtin.fail:
+        msg: >-
+          sshd refused the new configuration on {{ inventory_hostname }}; the previous one was kept and
+          sshd was not reloaded.

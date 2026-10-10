@@ -1,0 +1,13 @@
+# Test image for the role scenarios: an official base image plus systemd, Python, and an SSH
+# server, so a role sees what it would see on a freshly installed host. Not used at runtime.
+ARG BASE
+FROM ${BASE}
+ENV DEBIAN_FRONTEND=noninteractive container=podman
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        systemd systemd-sysv dbus python3 python3-apt sudo openssh-server ca-certificates curl gnupg iproute2 procps unzip \
+    && apt-get clean \
+    && mkdir -p /run/sshd \
+    && systemctl mask systemd-udevd.service systemd-udev-trigger.service getty.target console-getty.service
+STOPSIGNAL SIGRTMIN+3
+CMD ["/lib/systemd/systemd"]

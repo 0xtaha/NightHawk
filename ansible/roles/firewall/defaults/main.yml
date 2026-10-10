@@ -1,0 +1,28 @@
+# Who may connect. Each inbound rule of the network contract names one of these four groups.
+# Addresses allowed to reach SSH and other administration ports. Required.
+firewall_admin_allowlist: []
+# Addresses of collectors allowed to reach the gateway's external entry point (Docker hosts).
+firewall_collector_allowlist: []
+# The cluster's own nodes and servers, by default from the inventory groups.
+firewall_cluster_nodes: >-
+  {{ ((groups['k3s_servers'] | default([])) + (groups['k3s_agents'] | default([])))
+     | map('extract', hostvars, 'ansible_host') | select('defined') | list }}
+firewall_cluster_servers: >-
+  {{ (groups['k3s_servers'] | default([])) | map('extract', hostvars, 'ansible_host') | select('defined') | list }}
+
+# The address this playbook's own connection comes from. Taken from the SSH session; it must
+# lie inside firewall_admin_allowlist or nothing is changed.
+firewall_connection_address: "{{ (ansible_facts['env']['SSH_CLIENT'] | default('')).split(' ') | first }}"
+
+# Ports the operator asks for by number. Each must be a rule of the contract for this host's
+# role; anything else is refused. The contract's rules are always applied, so this is normally empty.
+firewall_requested_ports: []
+
+# If the change cuts the connection, the host restores its previous firewall by itself after
+# this many minutes.
+firewall_rollback_minutes: 5
+# Set to false to write the rule scripts and the plan for review without activating anything.
+firewall_activate: true
+
+firewall_state_dir: /etc/nighthawk/firewall
+firewall_script_dir: /usr/local/sbin

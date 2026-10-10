@@ -321,20 +321,28 @@ data and never destroys state-bootstrap resources.
 
 ### Recorded deferrals
 
-Items that `Plan.md` todos 1 to 4 name and that are deliberately not built
-yet. The same list is an amendment in `Plan.md`.
+Items that `Plan.md` todos 1 to 5 name and that are deliberately not built
+or not verified yet. The same list is an amendment in `Plan.md`.
 
 | Item | Owned by | Why later |
 | --- | --- | --- |
-| Ansible collection pins, and verification of the OS matrix | Phase 5 | Their first consumer, the Ansible automation, does not exist yet |
+| Verification of the host automation on real machines | Open | Phase 5 pinned the Ansible tooling and tested every role in containers of each supported system; no playbook has run on a real host. See [08-ansible.md](08-ansible.md#verification-limits) |
 | Chart lockfiles and Kubernetes image digests | Phase 6 | There is no chart to lock until the workloads are added |
 | IAM for the AWS load balancer controller | Phase 6 | Its policy is published per controller release, and none is pinned yet |
-| Firewall-format outputs such as UFW or iptables rules | Phase 8 | Only the port table and a JSON copy of the contract are generated today |
+| Standalone firewall-format outputs: documented UFW or iptables rule examples, AWS SG/NACL examples | Phase 8 | Host rules are generated and applied by the Ansible `firewall` role; outside it only the port table and a JSON copy of the contract are generated |
+| MetalLB, Longhorn, Traefik, and cert-manager on the k3s cluster | Phase 6 | Phase 5 checks their prerequisites; they are installed with the workloads that need them |
+| An AWS example platform document | Phase 6 | Nothing consumes one until the EKS workloads exist |
 | Prerequisite checks beyond Vault and Terraform | Phase 9 | They belong with the orchestration that needs the other tools |
 | Modelled backups, and an expiry for old state-bucket versions | Phase 10 | They belong with backup and restore |
 
-Also deferred and recorded where they arise: retention deletion tests, and
-production single-node Docker Compose.
+Also deferred and recorded where it arises: retention deletion tests.
+
+Done since this list was first recorded: the Ansible tooling pins and the
+evidence behind each operating system entry (phase 5, in
+`config/versions.yaml`), and production single-node Docker Compose, which is
+the Docker host deployment in [08-ansible.md](08-ansible.md#docker-host-deployment).
+What phase 5 could not verify without a target machine is the first row
+above.
 
 ## Compatibility research
 

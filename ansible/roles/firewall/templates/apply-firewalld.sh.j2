@@ -1,0 +1,29 @@
+#!/bin/sh
+# Managed by the NightHawk firewall role for a {{ nighthawk_host_role }}. Rules come from
+# config/network.yaml through the rendered inputs; changes here are overwritten.
+set -eu
+if [ "${1:-}" = "--persist" ]; then
+    # Until now only the running configuration changed; this is what survives a restart.
+    firewall-cmd --runtime-to-permanent
+    systemctl enable firewalld.service
+    exit 0
+fi
+systemctl start firewalld.service
+zone="$(firewall-cmd --get-default-zone)"
+# Start from nothing: the zone's stock services would admit anyone.
+for service in $(firewall-cmd --zone "$zone" --list-services); do
+    firewall-cmd --zone "$zone" --remove-service "$service"
+done
+for port in $(firewall-cmd --zone "$zone" --list-ports); do
+    firewall-cmd --zone "$zone" --remove-port "$port"
+done
+firewall-cmd --zone "$zone" --list-rich-rules | while IFS= read -r rule; do
+    [ -z "$rule" ] || firewall-cmd --zone "$zone" --remove-rich-rule "$rule"
+done
+firewall-cmd --zone "$zone" --set-target DROP 2>/dev/null || true
+{% for rule in firewall_plan %}
+# {{ rule.id }}
+{% for source in rule.sources %}
+firewall-cmd --zone "$zone" --add-rich-rule 'rule family="{{ source | nighthawk_address_family }}" source address="{{ source }}" port port="{{ rule.port }}" protocol="{{ rule.protocol }}" accept'
+{% endfor %}
+{% endfor %}

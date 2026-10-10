@@ -1,0 +1,14 @@
+- name: Place the cluster network's chart on the servers
+  hosts: all
+  gather_facts: true
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  vars:
+    k3s_cluster_shape: production
+    k3s_node_network: 192.0.2.0/24
+    k3s_pod_cidr: 10.42.0.0/16
+    k3s_service_cidr: 10.43.0.0/16
+    k3s_node_mtu: 1500
+    k3s_load_balancer_pool: [192.0.2.200-192.0.2.220]
+  roles:
+    - role: cilium

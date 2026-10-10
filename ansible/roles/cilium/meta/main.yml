@@ -1,0 +1,11 @@
+galaxy_info:
+  role_name: cilium
+  namespace: nighthawk
+  author: NightHawk
+  description: Installs the cluster network through the Helm controller that k3s includes.
+  license: Proprietary
+  min_ansible_version: "2.21"
+  platforms:
+    - name: Ubuntu
+      versions: [jammy, noble]
+dependencies: []

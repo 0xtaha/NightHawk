@@ -285,6 +285,26 @@ and switch the collector to it. The policy binds the identity, not the key,
 so nothing is re-rendered. Rollback: switch back to the old certificate while
 it is still valid.
 
+To renew in place instead, for example from a scheduled job or a playbook
+that is run again, add `--if-needed --renew-before-days <n>` and keep the
+same output directory:
+
+```sh
+python -m nighthawk issue-certificate --config platform.yaml --credential <id> \
+    --valid-days 90 --if-needed --renew-before-days 30 --output-dir <dir>
+```
+
+A new certificate is requested only when none exists there, when the
+existing one has fewer than `<n>` days left, or when it was not signed by
+the authority Vault has now. Otherwise the command prints that there is
+nothing to do, sends no signing request, and leaves both files untouched. A
+replacement is requested and verified beside the existing pair and renamed
+into place only afterwards, so a failed request leaves a working
+certificate and key. The renewal period must be shorter than the validity,
+or every run would issue a certificate. The
+[external collector playbook](08-ansible.md#external-collectors) renews this
+way.
+
 If the authority in Vault is replaced, every certificate has to be issued
 again and the gateway's trust re-rendered. The quickstart does both for the
 certificates it manages and prints that the authority changed.

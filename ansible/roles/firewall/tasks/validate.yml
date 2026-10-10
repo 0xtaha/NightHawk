@@ -1,0 +1,60 @@
+- name: Collect the rules of this host's role and who each one admits
+  ansible.builtin.set_fact:
+    firewall_rules: "{{ nighthawk.firewall[nighthawk_host_role] }}"
+    firewall_sources:
+      admin_allowlist: "{{ firewall_admin_allowlist }}"
+      collector_allowlist: "{{ firewall_collector_allowlist }}"
+      cluster_nodes: "{{ firewall_cluster_nodes }}"
+      cluster_servers: "{{ firewall_cluster_servers }}"
+
+- name: Refuse a rule with nobody allowed to use it
+  ansible.builtin.assert:
+    that: firewall_sources[item.source] | length > 0
+    fail_msg: >-
+      No address is supplied for {{ item.source }}, which network rule {{ item.id }}
+      (port {{ item.port }}) needs. The firewall was not changed.
+    quiet: true
+  loop: "{{ firewall_rules }}"
+  loop_control:
+    label: "{{ item.id }}"
+
+- name: Refuse an address that is not an address or a range
+  ansible.builtin.assert:
+    that: item | nighthawk_valid_network
+    fail_msg: "{{ item }} is not an address or a CIDR range. The firewall was not changed."
+    quiet: true
+  loop: "{{ firewall_sources.values() | flatten | unique }}"
+
+- name: Refuse a range that covers every address
+  ansible.builtin.assert:
+    that: not (item | nighthawk_covers_everything)
+    fail_msg: >-
+      {{ item }} covers every address. An allowlist that admits everyone is refused; the
+      firewall was not changed.
+    quiet: true
+  loop: "{{ firewall_sources.values() | flatten | unique }}"
+
+- name: Refuse a requested port the network contract does not declare for this role
+  ansible.builtin.assert:
+    that: item | int in (firewall_rules | map(attribute='port') | list)
+    fail_msg: >-
+      Port {{ item }} is not a rule of the network contract for a {{ nighthawk_host_role }}. Add the
+      rule to config/network.yaml and render again; the firewall was not changed.
+    quiet: true
+  loop: "{{ firewall_requested_ports }}"
+
+- name: Require the address this connection comes from
+  ansible.builtin.assert:
+    that: firewall_connection_address | length > 0
+    fail_msg: >-
+      The address this playbook connects from could not be determined, so it cannot be checked
+      against the SSH allowlist. Set firewall_connection_address. The firewall was not changed.
+    quiet: true
+
+- name: Refuse to cut off this very connection
+  ansible.builtin.assert:
+    that: firewall_connection_address | nighthawk_in_any_network(firewall_admin_allowlist)
+    fail_msg: >-
+      This playbook connects from {{ firewall_connection_address }}, which is outside
+      firewall_admin_allowlist. Applying the rules would lock it out; the firewall was not changed.
+    quiet: true

@@ -1,0 +1,11 @@
+# The strictest shipped profile. A rule is skipped only with a reason next to it.
+profile: production
+offline: true
+exclude_paths:
+  - .collections/
+  - .venv/
+  - molecule/.rendered/
+# The roles here are not published to Galaxy.
+skip_list:
+  - galaxy[no-changelog]
+  - galaxy[version-incorrect]

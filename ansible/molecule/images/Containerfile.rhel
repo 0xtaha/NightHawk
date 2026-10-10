@@ -1,0 +1,12 @@
+# Test image for the role scenarios: an official base image plus systemd, Python, and an SSH
+# server, so a role sees what it would see on a freshly installed host. Not used at runtime.
+# The package metadata is kept in the image: downloading it in every test run takes minutes.
+ARG BASE
+FROM ${BASE}
+ENV container=podman
+RUN dnf install -y systemd python3 python3-dnf sudo openssh-server ca-certificates gnupg2 iproute procps-ng unzip \
+    && dnf makecache \
+    && ssh-keygen -A \
+    && systemctl mask systemd-udevd.service systemd-udev-trigger.service getty.target console-getty.service
+STOPSIGNAL SIGRTMIN+3
+CMD ["/usr/sbin/init"]

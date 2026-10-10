@@ -1,0 +1,11 @@
+galaxy_info:
+  role_name: k3s_node
+  namespace: nighthawk
+  author: NightHawk
+  description: Installs a checksum-verified k3s server or agent without its bundled network add-ons.
+  license: Proprietary
+  min_ansible_version: "2.21"
+  platforms:
+    - name: Ubuntu
+      versions: [jammy, noble]
+dependencies: []

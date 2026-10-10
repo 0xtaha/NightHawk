@@ -1,0 +1,53 @@
+- name: Read the groups this system has
+  ansible.builtin.getent:
+    database: group
+
+- name: Create the collector's group
+  ansible.builtin.group:
+    name: "{{ alloy_collector_user }}"
+    system: true
+
+- name: Create the collector's account
+  ansible.builtin.user:
+    name: "{{ alloy_collector_user }}"
+    group: "{{ alloy_collector_user }}"
+    groups: "{{ alloy_collector_read_groups | select('in', ansible_facts['getent_group']) | list }}"
+    system: true
+    home: "{{ alloy_collector_state_dir }}"
+    create_home: false
+    shell: /usr/sbin/nologin
+    password: "!"
+  notify: Restart the collector
+
+- name: Create the collector's directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ alloy_collector_user }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: "{{ alloy_collector_config_dir }}", owner: root, mode: "0750"}
+    - {path: "{{ alloy_collector_config_dir }}/secrets", owner: "{{ alloy_collector_user }}", mode: "0700"}
+    - {path: "{{ alloy_collector_state_dir }}", owner: "{{ alloy_collector_user }}", mode: "0700"}
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Tell the collector where its files are
+  ansible.builtin.template:
+    src: environment.j2
+    dest: "{{ alloy_collector_config_dir }}/environment"
+    owner: root
+    group: "{{ alloy_collector_user }}"
+    mode: "0640"
+  notify: Restart the collector
+
+- name: Install the unit
+  ansible.builtin.template:
+    src: nighthawk-alloy.service.j2
+    dest: "/etc/systemd/system/{{ alloy_collector_unit }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: alloy_collector_unit_file
+  notify: Restart the collector

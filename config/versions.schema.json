@@ -14,6 +14,8 @@
     "container_images",
     "validation_tools",
     "secrets_store",
+    "automation_tools",
+    "host_artifacts",
     "os_support",
     "tracked_consumers"
   ],
@@ -206,6 +208,61 @@
         }
       }
     },
+    "automation_tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ansible_core", "ansible_lint", "molecule", "molecule_plugins", "collections"],
+      "properties": {
+        "ansible_core": { "$ref": "#/$defs/pin" },
+        "ansible_lint": { "$ref": "#/$defs/pin" },
+        "molecule": { "$ref": "#/$defs/pin" },
+        "molecule_plugins": { "$ref": "#/$defs/pin" },
+        "collections": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "pattern": "^[a-z][a-z0-9_]*$" },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "version", "source"],
+            "properties": {
+              "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$" },
+              "version": { "$ref": "#/$defs/release" },
+              "source": { "$ref": "#/$defs/source" }
+            }
+          }
+        }
+      }
+    },
+    "host_artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["docker_engine", "k3s", "alloy"],
+      "properties": {
+        "docker_engine": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "compose_plugin_version", "source", "runtime_verified", "signing_key_fingerprints"],
+          "properties": {
+            "version": { "$ref": "#/$defs/release" },
+            "compose_plugin_version": { "$ref": "#/$defs/release" },
+            "source": { "$ref": "#/$defs/source" },
+            "runtime_verified": { "type": "boolean" },
+            "signing_key_fingerprints": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["apt", "rpm"],
+              "properties": {
+                "apt": { "type": "string", "pattern": "^[0-9A-F]{40}$" },
+                "rpm": { "type": "string", "pattern": "^[0-9A-F]{40}$" }
+              }
+            }
+          }
+        },
+        "k3s": { "$ref": "#/$defs/checksummed" },
+        "alloy": { "$ref": "#/$defs/checksummed" }
+      }
+    },
     "os_support": {
       "type": "object",
       "additionalProperties": false,
@@ -230,6 +287,19 @@
     }
   },
   "$defs": {
+    "checksummed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256"],
+      "properties": {
+        "sha256": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "pattern": "^linux_[a-z0-9]+$" },
+          "additionalProperties": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }
+      }
+    },
     "app_version_exception": {
       "type": "object",
       "additionalProperties": false,
@@ -290,8 +360,9 @@
     "os_target": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["distribution", "versions", "architectures"],
+      "required": ["distribution", "versions", "architectures", "evidence"],
       "properties": {
+        "evidence": { "enum": ["container", "host", "declared"] },
         "distribution": { "type": "string", "minLength": 1 },
         "versions": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 },
         "architectures": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 }

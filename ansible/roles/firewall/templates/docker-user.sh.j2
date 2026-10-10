@@ -1,0 +1,19 @@
+#!/bin/sh
+# Managed by the NightHawk firewall role. A container runtime publishes ports through its own
+# chains, around the host firewall. This limits the published external entry point to the
+# collector allowlist in DOCKER-USER, the chain the runtime evaluates first.
+set -eu
+{% set external = firewall_plan | selectattr('id', 'equalto', 'remote-gateway') | list %}
+for tool in iptables ip6tables; do
+    "$tool" -N NIGHTHAWK-PUBLISHED 2>/dev/null || "$tool" -F NIGHTHAWK-PUBLISHED
+    "$tool" -N DOCKER-USER 2>/dev/null || true
+    "$tool" -C DOCKER-USER -j NIGHTHAWK-PUBLISHED 2>/dev/null || "$tool" -I DOCKER-USER 1 -j NIGHTHAWK-PUBLISHED
+done
+{% for rule in external %}
+# {{ rule.id }}: the port as the client addressed it, before it was forwarded to the container.
+{% for source in rule.sources %}
+{{ 'ip6tables' if (source | nighthawk_address_family) == 'ipv6' else 'iptables' }} -A NIGHTHAWK-PUBLISHED -p {{ rule.protocol }} -m conntrack --ctorigdstport {{ rule.port }} --ctdir ORIGINAL -s {{ source }} -j RETURN
+{% endfor %}
+iptables -A NIGHTHAWK-PUBLISHED -p {{ rule.protocol }} -m conntrack --ctorigdstport {{ rule.port }} --ctdir ORIGINAL -j DROP
+ip6tables -A NIGHTHAWK-PUBLISHED -p {{ rule.protocol }} -m conntrack --ctorigdstport {{ rule.port }} --ctdir ORIGINAL -j DROP
+{% endfor %}

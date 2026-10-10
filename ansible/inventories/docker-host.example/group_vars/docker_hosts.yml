@@ -1,0 +1,15 @@
+nighthawk_host_role: docker_host
+
+# Addresses of the collectors allowed to reach the gateway's external entry point.
+firewall_collector_allowlist:
+  - 203.0.113.0/24
+
+# Where the stack lives on the host, and the account it runs as.
+nighthawk_stack_dir: /opt/nighthawk
+nighthawk_stack_user: nighthawk
+# The host address the external entry point is published on. Required; there is no default.
+nighthawk_external_bind_address: 192.0.2.10
+
+# The two trees `python -m nighthawk render-docker-deployment` wrote on this machine.
+nighthawk_rendered_dir: /absolute/path/to/deployment/rendered
+nighthawk_secrets_dir: /absolute/path/to/deployment/secrets

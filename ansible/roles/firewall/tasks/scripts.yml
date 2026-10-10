@@ -1,0 +1,46 @@
+- name: Refresh the package index (Debian family)
+  # The one step that also runs in check mode: without an index no package can be looked up.
+  ansible.builtin.apt:
+    update_cache: true
+    # Skipped while the index is younger than a day; a host without one always gets it.
+    cache_valid_time: 86400
+  when: ansible_facts['os_family'] == 'Debian'
+  check_mode: false
+  changed_when: false
+
+- name: Install the firewall tool for this distribution family
+  ansible.builtin.package:
+    name: "{{ 'firewalld' if ansible_facts['os_family'] == 'RedHat' else 'ufw' }}"
+    state: present
+
+- name: Write the scripts that apply, restore, and limit the rules
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ firewall_script_dir }}/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0700"
+  loop: "{{ firewall_script_files | selectattr('when') | list }}"
+  loop_control:
+    label: "{{ item.dest }}"
+  register: firewall_scripts
+  vars:
+    firewall_script_files:
+      - src: "{{ 'apply-firewalld.sh.j2' if ansible_facts['os_family'] == 'RedHat' else 'apply-ufw.sh.j2' }}"
+        dest: nighthawk-firewall-apply
+        when: true
+      - src: "{{ 'rollback-firewalld.sh.j2' if ansible_facts['os_family'] == 'RedHat' else 'rollback-ufw.sh.j2' }}"
+        dest: nighthawk-firewall-rollback
+        when: true
+      - src: docker-user.sh.j2
+        dest: nighthawk-firewall-docker
+        when: "{{ nighthawk_host_role == 'docker_host' }}"
+
+- name: Keep the container runtime's published ports inside the rules after every start
+  ansible.builtin.template:
+    src: docker-user.service.j2
+    dest: /etc/systemd/system/nighthawk-firewall-docker.service
+    owner: root
+    group: root
+    mode: "0644"
+  when: nighthawk_host_role == 'docker_host'

@@ -1,0 +1,27 @@
+# Managed by the NightHawk k3s_node role. k3s reads this file by itself.
+token-file: {{ k3s_node_config_dir }}/join-token
+node-ip: {{ k3s_node_address }}
+{% if k3s_node_role == 'server' %}
+{% if k3s_node_is_first_server | bool %}
+# The first server starts the embedded etcd that further servers join.
+cluster-init: true
+{% else %}
+server: {{ k3s_node_server_url }}
+{% endif %}
+tls-san:
+  - {{ k3s_node_address }}
+cluster-cidr: {{ k3s_pod_cidr }}
+service-cidr: {{ k3s_service_cidr }}
+# The cluster network is installed by the cilium role; the ingress controller and the load
+# balancer are installed with the workloads. None of the bundled ones is wanted.
+flannel-backend: none
+disable-network-policy: true
+disable:
+  - traefik
+  - servicelb
+secrets-encryption: true
+# The administrative kubeconfig stays readable by root only.
+write-kubeconfig-mode: "0600"
+{% else %}
+server: {{ k3s_node_server_url }}
+{% endif %}

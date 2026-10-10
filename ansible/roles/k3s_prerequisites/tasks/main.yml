@@ -1,0 +1,92 @@
+# Gathers what each node reports and hands it, with what the inventory declares, to
+# `check-cluster-layout` on the control machine. Every rule lives in that command. Nothing on
+# any node is changed here, and one problem on one node stops the run for all of them.
+- name: Ask which of the checked kernel modules are loaded or can be loaded
+  ansible.builtin.command:
+    cmd: modinfo --field name {{ item }}
+  loop: "{{ nighthawk.cluster.checked_modules }}"
+  register: k3s_prerequisites_modinfo
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Read the loaded kernel modules
+  ansible.builtin.slurp:
+    src: /proc/modules
+  register: k3s_prerequisites_loaded
+
+- name: Read installed packages
+  ansible.builtin.package_facts:
+    manager: auto
+
+- name: Describe this node
+  ansible.builtin.set_fact:
+    k3s_prerequisites_node:
+      role: "{{ 'server' if inventory_hostname in (groups['k3s_servers'] | default([])) else 'agent' }}"
+      address: "{{ ansible_facts[k3s_prerequisites_interface | replace('-', '_')]['ipv4']['address'] }}"
+      mtu: "{{ ansible_facts[k3s_prerequisites_interface | replace('-', '_')]['mtu'] | int }}"
+      kernel: "{{ ansible_facts['kernel'] }}"
+      modules: >-
+        {{ (k3s_prerequisites_modinfo.results | selectattr('rc', 'equalto', 0) | map(attribute='item') | list
+            + ((k3s_prerequisites_loaded.content | b64decode).splitlines() | map('split') | map('first') | list))
+           | intersect(nighthawk.cluster.checked_modules) | unique | sort }}
+      packages: "{{ nighthawk.cluster.checked_packages | intersect(ansible_facts['packages'].keys() | list) }}"
+      storage_disks: "{{ k3s_storage_disks | default([]) }}"
+      block_devices: "{{ k3s_prerequisites_devices | from_json }}"
+  vars:
+    # For each declared disk that exists: why it cannot be handed to the storage add-on, or nothing.
+    k3s_prerequisites_devices: >-
+      {%- set found = {} -%}
+      {%- for disk in k3s_storage_disks | default([]) -%}
+      {%-   set name = disk | basename -%}
+      {%-   if name in ansible_facts['devices'] -%}
+      {%-     set device = ansible_facts['devices'][name] -%}
+      {%-     set mounted = ansible_facts['mounts'] | selectattr('device', 'match', '^' ~ (disk | regex_escape) ~ '(p?[0-9]+)?$')
+                            | map(attribute='mount') | list -%}
+      {%-     if mounted -%}
+      {%-       set reason = 'mounted at ' ~ mounted | join(', ') -%}
+      {%-     elif device.partitions -%}
+      {%-       set reason = 'has partitions' -%}
+      {%-     elif device.holders -%}
+      {%-       set reason = 'held by ' ~ device.holders | join(', ') -%}
+      {%-     else -%}
+      {%-       set reason = '' -%}
+      {%-     endif -%}
+      {%-     set _ = found.update({name: {'in_use': reason}}) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ found | to_json }}
+
+- name: Judge the layout on the control machine
+  ansible.builtin.command:
+    argv:
+      - "{{ k3s_prerequisites_python }}"
+      - -m
+      - nighthawk
+      - check-cluster-layout
+      - --layout=-
+    chdir: "{{ k3s_prerequisites_repository_dir }}"
+    stdin: "{{ k3s_prerequisites_layout | to_json }}"
+  vars:
+    k3s_prerequisites_layout:
+      shape: "{{ k3s_cluster_shape }}"
+      node_network: "{{ k3s_node_network }}"
+      pod_cidr: "{{ k3s_pod_cidr }}"
+      service_cidr: "{{ k3s_service_cidr }}"
+      mtu: "{{ k3s_node_mtu | int }}"
+      load_balancer_pool: "{{ k3s_load_balancer_pool }}"
+      nodes: >-
+        {{ dict(k3s_prerequisites_nodes
+                | zip(k3s_prerequisites_nodes | map('extract', hostvars, 'k3s_prerequisites_node'))) }}
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: k3s_prerequisites_check
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Stop every node when the layout cannot work
+  ansible.builtin.fail:
+    msg: "{{ k3s_prerequisites_check.stderr | default('check-cluster-layout did not run') }}"
+  when: k3s_prerequisites_check.rc | default(1) != 0

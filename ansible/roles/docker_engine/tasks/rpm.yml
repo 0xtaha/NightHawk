@@ -1,0 +1,38 @@
+- name: Trust the verified key for packages
+  ansible.builtin.rpm_key:
+    key: "{{ docker_engine_key_path }}"
+    fingerprint: "{{ docker_engine_fingerprint }}"
+    state: present
+
+- name: Add the repository, with signature checking on
+  ansible.builtin.yum_repository:
+    name: nighthawk-docker
+    description: Docker CE (managed by the NightHawk docker_engine role)
+    baseurl: "{{ docker_engine_repository_base }}/{{ docker_engine_repository_distribution }}/$releasever/$basearch/stable"
+    gpgcheck: true
+    gpgkey: "file://{{ docker_engine_key_path }}"
+    enabled: true
+  register: docker_engine_repository
+
+- name: Install the pinned engine and Compose plugin
+  ansible.builtin.dnf:
+    name:
+      - "docker-ce-{{ docker_engine_version }}"
+      - "docker-ce-cli-{{ docker_engine_version }}"
+      - "docker-compose-plugin-{{ docker_engine_compose_version }}"
+      - containerd.io
+    state: present
+    allow_downgrade: "{{ docker_engine_allow_version_change | bool }}"
+  # The repository is only added for real, so a dry run cannot resolve the package.
+  when: not ansible_check_mode or docker_engine_repository is not changed
+
+- name: Install the version lock plugin
+  ansible.builtin.dnf:
+    name: python3-dnf-plugin-versionlock
+    state: present
+
+- name: Hold the pinned version against unattended upgrades
+  community.general.dnf_versionlock:
+    name: "{{ docker_engine_packages + ['docker-compose-plugin'] }}"
+    state: present
+  when: not ansible_check_mode or docker_engine_repository is not changed

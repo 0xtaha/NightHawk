@@ -1,0 +1,13 @@
+# Managed by the NightHawk firewall role.
+[Unit]
+Description=Limit container-published ports to the NightHawk firewall rules
+After=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+ExecStart={{ firewall_script_dir }}/nighthawk-firewall-docker
+
+[Install]
+WantedBy=multi-user.target docker.service

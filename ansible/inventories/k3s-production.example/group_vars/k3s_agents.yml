@@ -1,0 +1,4 @@
+nighthawk_host_role: cluster_agent
+# A whole block device on each storage node, unused and unmounted, for the storage add-on.
+k3s_storage_disks:
+  - /dev/sdb

@@ -1,0 +1,10 @@
+- name: Reload sshd
+  ansible.builtin.service:
+    name: "{{ hardening_sshd_service }}"
+    state: reloaded
+
+- name: Load kernel settings
+  ansible.builtin.command:
+    cmd: sysctl --load {{ hardening_sysctl_file }}
+  changed_when: true
+  when: hardening_apply_sysctl_now | bool

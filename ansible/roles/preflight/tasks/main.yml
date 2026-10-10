@@ -1,0 +1,34 @@
+# Every playbook runs this first, on every host it targets. Nothing here changes a host.
+- name: Require the rendered inputs
+  ansible.builtin.assert:
+    that:
+      - nighthawk is defined
+      - nighthawk.os_support is defined
+      - preflight_host_role is defined
+      - preflight_host_role in nighthawk.os_support
+    fail_msg: >-
+      The rendered inputs are not loaded, or nighthawk_host_role is not one of their roles.
+      Run `python -m nighthawk render-contracts`, point nighthawk_inputs_file at its
+      ansible/nighthawk.yml, and set nighthawk_host_role for this host's group.
+    quiet: true
+  run_once: true
+
+- name: Evaluate this host
+  ansible.builtin.import_tasks: evaluate.yml
+
+# One failure for the whole run, listing every unsupported host, before any host is changed.
+- name: Stop when any host is not supported
+  ansible.builtin.fail:
+    msg: >-
+      Unsupported operating system, nothing was changed.
+      {{ ansible_play_hosts_all | map('extract', hostvars)
+         | rejectattr('preflight_supported', 'defined') | map(attribute='inventory_hostname')
+         | map('regex_replace', '$', ': facts could not be gathered') | list
+         + ansible_play_hosts_all | map('extract', hostvars)
+         | selectattr('preflight_supported', 'defined') | rejectattr('preflight_supported')
+         | map(attribute='preflight_finding') | list }}
+  when: >-
+    ansible_play_hosts_all | map('extract', hostvars) | rejectattr('preflight_supported', 'defined') | list | length > 0
+    or ansible_play_hosts_all | map('extract', hostvars) | selectattr('preflight_supported', 'defined')
+    | rejectattr('preflight_supported') | list | length > 0
+  run_once: true

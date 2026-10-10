@@ -1,0 +1,17 @@
+# The file `python -m nighthawk render-contracts` wrote: <output>/ansible/nighthawk.yml.
+# Every port, version, checksum, and supported system the roles use comes from it.
+nighthawk_inputs_file: /absolute/path/to/contracts/ansible/nighthawk.yml
+
+ansible_user: deploy
+ansible_become: true
+
+# Addresses allowed to reach SSH. Must include the address this playbook connects from.
+# A range covering every address is refused.
+firewall_admin_allowlist:
+  - 198.51.100.0/24
+# If the firewall change cuts the connection, the host restores its previous rules by itself
+# after this many minutes.
+firewall_rollback_minutes: 5
+
+# Opt in to unattended installation of security updates.
+hardening_automatic_security_updates: false

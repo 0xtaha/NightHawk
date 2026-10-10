@@ -1,0 +1,82 @@
+- name: Each system is judged for the role it is given
+  hosts: all
+  gather_facts: true
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  tasks:
+    - name: Judge it as a Docker host
+      ansible.builtin.include_role:
+        name: preflight
+        tasks_from: evaluate
+      vars:
+        preflight_host_role: docker_host
+
+    - name: Every platform is a supported Docker host
+      ansible.builtin.assert:
+        that: preflight_supported
+
+    - name: Judge it as a cluster node
+      ansible.builtin.include_role:
+        name: preflight
+        tasks_from: evaluate
+      vars:
+        preflight_host_role: cluster_server
+
+    - name: Only Ubuntu is a supported cluster node, and the finding names host, system, and role
+      ansible.builtin.assert:
+        that:
+          - preflight_supported == (ansible_facts['distribution'] == 'Ubuntu')
+          - inventory_hostname in preflight_finding
+          - ansible_facts['distribution'] in preflight_finding
+          - "'is not supported as a cluster_server' in preflight_finding"
+
+    - name: Judge a release the matrix does not list
+      ansible.builtin.include_role:
+        name: preflight
+        tasks_from: evaluate
+      vars:
+        preflight_host_role: docker_host
+        preflight_reported_versions: ["99.0", "99"]
+
+    - name: An unlisted release is unsupported
+      ansible.builtin.assert:
+        that:
+          - not preflight_supported
+          - "'99.0' in preflight_finding"
+
+    - name: Judge an architecture the matrix does not list
+      ansible.builtin.include_role:
+        name: preflight
+        tasks_from: evaluate
+      vars:
+        preflight_host_role: docker_host
+        preflight_reported_architecture: riscv64
+
+    - name: An unlisted architecture is unsupported
+      ansible.builtin.assert:
+        that: not preflight_supported
+
+# A system that is supported for Docker hosts only, targeted as a cluster node.
+- name: An unsupported host stops the run with one message
+  hosts: nh-rocky-9
+  gather_facts: true
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  vars:
+    preflight_host_role: cluster_server
+  tasks:
+    - name: Run the whole preflight and expect it to stop
+      block:
+        - name: Preflight
+          ansible.builtin.include_role:
+            name: preflight
+        - name: This must not be reached
+          ansible.builtin.fail:
+            msg: The preflight let an unsupported host through.
+      rescue:
+        - name: It stopped for the right reason
+          ansible.builtin.assert:
+            that:
+              - "'Unsupported operating system, nothing was changed' in ansible_failed_result.msg"
+              - "'nh-rocky-9: Rocky' in ansible_failed_result.msg"
+              - "'is not supported as a cluster_server' in ansible_failed_result.msg"

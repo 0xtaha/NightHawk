@@ -1,0 +1,46 @@
+# Stand-ins for what the control machine holds: a credential and a client certificate from a
+# throwaway authority. The configuration is a real one, rendered by ansible/molecule/run.sh.
+- name: Write a credential and a certificate on the control machine
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    alloy_collector_test_root: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/collector"
+  tasks:
+    - name: Start from nothing
+      ansible.builtin.file:
+        path: "{{ alloy_collector_test_root }}"
+        state: absent
+
+    - name: Create the directories
+      ansible.builtin.file:
+        path: "{{ alloy_collector_test_root }}/{{ item }}"
+        state: directory
+        mode: "0700"
+      loop: [certificates, broken]
+
+    - name: Write a credential
+      ansible.builtin.copy:
+        content: not-a-real-credential
+        dest: "{{ alloy_collector_test_root }}/credential"
+        mode: "0600"
+
+    - name: Create a throwaway authority and a client certificate signed by it
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          cd "{{ alloy_collector_test_root }}"
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 2 \
+            -subj "/CN=Test authority" -keyout ca.key.pem -out gateway-ca.pem
+          openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+            -subj "/CN=collector" -keyout certificates/example-ingest.key.pem -out client.csr.pem
+          openssl x509 -req -in client.csr.pem -CA gateway-ca.pem -CAkey ca.key.pem -CAcreateserial -days 2 \
+            -out certificates/example-ingest.crt.pem
+        creates: "{{ alloy_collector_test_root }}/certificates/example-ingest.crt.pem"
+
+    - name: Write a configuration the collector must refuse
+      ansible.builtin.copy:
+        content: |
+          this is not { a collector configuration
+        dest: "{{ alloy_collector_test_root }}/broken/datastream.alloy"
+        mode: "0644"

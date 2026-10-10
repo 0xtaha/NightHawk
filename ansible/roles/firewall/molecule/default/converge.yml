@@ -1,0 +1,13 @@
+- name: Prepare the firewall of a Docker host for review
+  hosts: all
+  gather_facts: true
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  vars:
+    nighthawk_host_role: docker_host
+    firewall_activate: false
+    firewall_connection_address: 198.51.100.7
+    firewall_admin_allowlist: [198.51.100.0/24, "2001:db8:1::/48"]
+    firewall_collector_allowlist: [203.0.113.0/24, 203.0.113.200]
+  roles:
+    - role: firewall

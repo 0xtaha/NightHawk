@@ -1,0 +1,157 @@
+# Only files that differ are replaced, and files that are no longer rendered are removed.
+# What changed decides which running services must be told to read their files again.
+- name: Record the files in place before copying
+  ansible.builtin.find:
+    paths: "{{ item }}"
+    recurse: true
+    hidden: true
+    get_checksum: true
+  loop:
+    - "{{ nighthawk_stack_rendered_target }}"
+    - "{{ nighthawk_stack_secrets_target }}"
+  register: nighthawk_stack_before
+
+- name: Copy the rendered configuration
+  ansible.builtin.copy:
+    src: "{{ nighthawk_rendered_dir }}/"
+    dest: "{{ nighthawk_stack_rendered_target }}/"
+    owner: root
+    group: root
+    mode: "0644"
+    directory_mode: "0755"
+
+- name: Copy the secret files, readable by the stack's account only
+  ansible.builtin.copy:
+    src: "{{ nighthawk_secrets_dir }}/"
+    dest: "{{ nighthawk_stack_secrets_target }}/"
+    owner: "{{ nighthawk_stack_user }}"
+    group: "{{ nighthawk_stack_user }}"
+    mode: "0600"
+    directory_mode: "0700"
+  no_log: true
+
+- name: List what the control machine rendered
+  ansible.builtin.find:
+    paths: "{{ item }}"
+    recurse: true
+    hidden: true
+  loop:
+    - "{{ nighthawk_rendered_dir }}"
+    - "{{ nighthawk_secrets_dir }}"
+  delegate_to: localhost
+  become: false
+  register: nighthawk_stack_local
+  no_log: true
+
+- name: List what is on the host
+  ansible.builtin.find:
+    paths: "{{ item }}"
+    recurse: true
+    hidden: true
+    get_checksum: true
+  loop:
+    - "{{ nighthawk_stack_rendered_target }}"
+    - "{{ nighthawk_stack_secrets_target }}"
+  register: nighthawk_stack_after
+
+- name: Work out which files are no longer rendered
+  ansible.builtin.set_fact:
+    nighthawk_stack_stale: >-
+      {{ (nighthawk_stack_after.results[0].files | map(attribute='path')
+          | map('relpath', nighthawk_stack_rendered_target)
+          | difference(nighthawk_stack_local.results[0].files | map(attribute='path') | map('relpath', nighthawk_rendered_dir))
+          | map('regex_replace', '^', nighthawk_stack_rendered_target ~ '/') | list)
+         + (nighthawk_stack_after.results[1].files | map(attribute='path')
+            | map('relpath', nighthawk_stack_secrets_target)
+            | difference(nighthawk_stack_local.results[1].files | map(attribute='path') | map('relpath', nighthawk_secrets_dir))
+            | map('regex_replace', '^', nighthawk_stack_secrets_target ~ '/') | list) }}
+
+- name: Remove files that are no longer rendered
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ nighthawk_stack_stale }}"
+
+- name: Work out what changed
+  ansible.builtin.set_fact:
+    # One `path checksum` line per file, before and after; a line on one side only is a change.
+    nighthawk_stack_changed_files: >-
+      {{ (nighthawk_stack_before.results | map(attribute='files') | flatten | map(attribute='path')
+          | zip(nighthawk_stack_before.results | map(attribute='files') | flatten | map(attribute='checksum'))
+          | map('join', ' ') | list)
+         | symmetric_difference(
+             nighthawk_stack_after.results | map(attribute='files') | flatten
+             | rejectattr('path', 'in', nighthawk_stack_stale) | map(attribute='path')
+             | zip(nighthawk_stack_after.results | map(attribute='files') | flatten
+                   | rejectattr('path', 'in', nighthawk_stack_stale) | map(attribute='checksum'))
+             | map('join', ' ') | list)
+         | map('split', ' ') | map('first') | unique | list }}
+
+- name: Start with no service to tell
+  ansible.builtin.set_fact:
+    nighthawk_stack_reloads: []
+
+- name: Work out which services must read their files again
+  ansible.builtin.set_fact:
+    nighthawk_stack_reloads: "{{ nighthawk_stack_reloads + [item.service] }}"
+  loop: "{{ nighthawk_stack_manifest.reloads }}"
+  loop_control:
+    label: "{{ item.service }}"
+  vars:
+    nighthawk_stack_reload_pattern: >-
+      ^({{ ((item.rendered | map('regex_replace', '^', nighthawk_stack_rendered_target ~ '/') | list)
+            + (item.secrets | map('regex_replace', '^', nighthawk_stack_secrets_target ~ '/') | list))
+           | map('regex_escape') | join('|') }})/
+  when: nighthawk_stack_changed_files | select('match', nighthawk_stack_reload_pattern) | list | length > 0
+
+# The image source travels inside the rendered tree as one archive. It is unpacked again only
+# when the archive changed, into an emptied directory, so a removed source file does not linger.
+- name: Read the checksum of the image source that was copied
+  ansible.builtin.stat:
+    path: "{{ nighthawk_stack_rendered_target }}/{{ nighthawk_stack_manifest.source_archive }}"
+    checksum_algorithm: sha256
+  register: nighthawk_stack_archive
+
+- name: Read the checksum of the image source that is unpacked
+  ansible.builtin.slurp:
+    src: "{{ nighthawk_stack_source_target }}.sha256"
+  register: nighthawk_stack_unpacked
+  failed_when: false
+
+- name: Decide whether the image source must be unpacked
+  ansible.builtin.set_fact:
+    nighthawk_stack_source_changed: >-
+      {{ nighthawk_stack_archive.stat.exists
+         and (nighthawk_stack_unpacked.content | default('') | b64decode | trim) != nighthawk_stack_archive.stat.checksum }}
+
+- name: Unpack the image source
+  when: nighthawk_stack_source_changed
+  block:
+    - name: Empty the image source directory
+      ansible.builtin.file:
+        path: "{{ nighthawk_stack_source_target }}"
+        state: absent
+
+    - name: Create the image source directory
+      ansible.builtin.file:
+        path: "{{ nighthawk_stack_source_target }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Unpack the archive
+      ansible.builtin.unarchive:
+        src: "{{ nighthawk_stack_rendered_target }}/{{ nighthawk_stack_manifest.source_archive }}"
+        dest: "{{ nighthawk_stack_source_target }}"
+        remote_src: true
+        owner: root
+        group: root
+
+    - name: Record which archive is unpacked
+      ansible.builtin.copy:
+        content: "{{ nighthawk_stack_archive.stat.checksum }}\n"
+        dest: "{{ nighthawk_stack_source_target }}.sha256"
+        owner: root
+        group: root
+        mode: "0644"

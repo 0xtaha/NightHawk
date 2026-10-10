@@ -1,0 +1,88 @@
+- name: Copy the credential, the authority, and the client certificate, for the collector's account only
+  ansible.builtin.copy:
+    src: "{{ item.value }}"
+    dest: "{{ alloy_collector_config_dir }}/secrets/{{ item.key }}"
+    owner: "{{ alloy_collector_user }}"
+    group: "{{ alloy_collector_user }}"
+    mode: "0600"
+  loop: "{{ alloy_collector_secret_files | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  no_log: true
+  # The collector reads these files again by itself; a reload makes it immediate.
+  notify: Reload the collector
+
+# The configuration is replaced as a whole, and only after the collector itself accepted the
+# new one. Until then the running one stays where it is.
+- name: Read the digest of the configuration in place
+  ansible.builtin.slurp:
+    src: "{{ alloy_collector_config_dir }}/active.sha256"
+  register: alloy_collector_active
+  failed_when: false
+
+- name: Replace the configuration
+  when: (alloy_collector_active.content | default('') | b64decode | trim) != alloy_collector_config_digest
+  block:
+    - name: Empty the candidate directory
+      ansible.builtin.file:
+        path: "{{ alloy_collector_config_dir }}/candidate"
+        state: absent
+
+    - name: Copy the rendered configuration as a candidate
+      ansible.builtin.copy:
+        src: "{{ alloy_collector_rendered_dir }}/"
+        dest: "{{ alloy_collector_config_dir }}/candidate/"
+        owner: root
+        group: "{{ alloy_collector_user }}"
+        mode: "0640"
+        directory_mode: "0750"
+
+    - name: Let the collector check the candidate
+      ansible.builtin.command:
+        argv:
+          - "{{ alloy_collector_binary }}"
+          - validate
+          - "{{ alloy_collector_config_dir }}/candidate"
+      environment:
+        NIGHTHAWK_CREDENTIAL_FILE: "{{ alloy_collector_config_dir }}/secrets/credential"
+        NIGHTHAWK_GATEWAY_CA_FILE: "{{ alloy_collector_config_dir }}/secrets/gateway-ca.pem"
+        NIGHTHAWK_CLIENT_CERT_FILE: "{{ alloy_collector_config_dir }}/secrets/client.crt.pem"
+        NIGHTHAWK_CLIENT_KEY_FILE: "{{ alloy_collector_config_dir }}/secrets/client.key.pem"
+      register: alloy_collector_validation
+      changed_when: false
+      failed_when: false
+
+    - name: Keep the running configuration when the candidate is refused
+      ansible.builtin.file:
+        path: "{{ alloy_collector_config_dir }}/candidate"
+        state: absent
+      when: alloy_collector_validation.rc | default(0) != 0
+
+    - name: Fail, showing what the collector said
+      ansible.builtin.fail:
+        msg: >-
+          The collector refused the rendered configuration in {{ alloy_collector_rendered_dir }}; the
+          running configuration on {{ inventory_hostname }} was kept.
+          {{ alloy_collector_validation.stderr | default('') }} {{ alloy_collector_validation.stdout | default('') }}
+      when: alloy_collector_validation.rc | default(0) != 0
+
+    - name: Put the accepted configuration in place
+      ansible.builtin.shell:
+        cmd: |
+          set -eu
+          rm -rf "{{ alloy_collector_config_dir }}/previous"
+          if [ -d "{{ alloy_collector_config_dir }}/active" ]; then
+            mv "{{ alloy_collector_config_dir }}/active" "{{ alloy_collector_config_dir }}/previous"
+          fi
+          mv "{{ alloy_collector_config_dir }}/candidate" "{{ alloy_collector_config_dir }}/active"
+          rm -rf "{{ alloy_collector_config_dir }}/previous"
+      changed_when: true
+      notify: Reload the collector
+
+    - name: Record which configuration is in place
+      ansible.builtin.copy:
+        content: "{{ alloy_collector_config_digest }}\n"
+        dest: "{{ alloy_collector_config_dir }}/active.sha256"
+        owner: root
+        group: root
+        mode: "0644"

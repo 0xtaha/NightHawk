@@ -1,0 +1,4 @@
+# Uses every platform from ansible/molecule/base.yml. Compose is not run: a test container has
+# no container runtime. What is tested is what reaches the host and with which permissions.
+scenario:
+  name: default

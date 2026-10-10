@@ -1,0 +1,40 @@
+# The plan is the contract's rules with each source group replaced by its addresses. It is
+# kept on the host, so a later run can tell whether anything would change.
+- name: Expand each rule to the addresses it admits
+  ansible.builtin.set_fact:
+    firewall_plan: >-
+      {{ firewall_plan | default([]) + [{
+           'id': item.id, 'protocol': item.protocol, 'port': item.port,
+           'sources': firewall_sources[item.source] | unique | sort,
+         }] }}
+  loop: "{{ firewall_rules | sort(attribute='id') }}"
+  loop_control:
+    label: "{{ item.id }}"
+
+- name: Create the state directory
+  ansible.builtin.file:
+    path: "{{ firewall_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Read the plan that is in force
+  ansible.builtin.slurp:
+    src: "{{ firewall_state_dir }}/active-plan.json"
+  register: firewall_active_plan
+  failed_when: false
+
+- name: Decide whether the rules change
+  ansible.builtin.set_fact:
+    firewall_plan_changed: >-
+      {{ firewall_active_plan.content is not defined
+         or (firewall_active_plan.content | b64decode | from_json) != firewall_plan }}
+
+- name: Record the plan for review
+  ansible.builtin.copy:
+    content: "{{ firewall_plan | to_nice_json(indent=2) }}\n"
+    dest: "{{ firewall_state_dir }}/plan.json"
+    owner: root
+    group: root
+    mode: "0600"

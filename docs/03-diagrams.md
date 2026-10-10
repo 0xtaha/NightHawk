@@ -91,6 +91,13 @@ flowchart TB
         CloudDB["HA PostgreSQL for multi-replica Grafana<br/>no SeaweedFS metadata database"]
     end
 
+    subgraph Automation["Host and cluster automation - Ansible"]
+        HostRoles["preflight, hardening, firewall<br/>implemented, container-tested"]
+        DockerHost["docker_engine + nighthawk_stack<br/>remote single-node Compose, implemented, container-tested"]
+        ClusterRoles["k3s_prerequisites, k3s_node, cilium<br/>implemented; k3s start not exercised"]
+        CollectorRole["alloy_collector<br/>systemd service on external hosts, implemented, container-tested"]
+    end
+
     subgraph Boundary["Zero-resource Terraform boundary roots"]
         SelfHostedBoundary["environments/self-hosted-k8s<br/>Ansible/Helm-owned, implemented"]
         DockerBoundary["environments/docker<br/>Compose-owned, implemented"]
@@ -108,10 +115,16 @@ flowchart TB
     StateBootstrap -. "remote state backend for" .-> EKS
     StateBootstrap -. "remote state backend for" .-> S3
     SelfHostedBoundary -. "applies zero resources; hosts Ansible/Helm-managed" .-> LocalRuntime
+    Renderer -. "rendered inputs: ports, pins, checksums" .-> HostRoles
+    HostRoles -. "prepare" .-> DockerHost
+    HostRoles -. "prepare" .-> ClusterRoles
+    DockerHost -. "deploys Compose to a remote host" .-> LocalRuntime
+    ClusterRoles -. "bootstraps k3s for" .-> LocalRuntime
+    CollectorRole -. "installs collectors that deliver through" .-> Gateway
     DockerBoundary -. "applies zero resources; hosts Compose-managed" .-> LocalRuntime
 
     classDef implemented fill:#dbeafe,stroke:#2563eb,color:#172554
-    class Config,Renderer,Terraform,Secrets,StateBootstrap,EKS,IRSA,SelfHostedBoundary,DockerBoundary,Alloy,Gateway,Authz implemented
+    class Config,Renderer,Terraform,Secrets,StateBootstrap,EKS,IRSA,SelfHostedBoundary,DockerBoundary,Alloy,Gateway,Authz,HostRoles,DockerHost,ClusterRoles,CollectorRole implemented
 ```
 
 **Reading the diagram**
@@ -119,6 +132,10 @@ flowchart TB
 - Blue nodes identify implemented configuration/module code, not deployed
   infrastructure. Dotted arrows show hosting, provisioning, or configuration
   relationships; solid arrows show application or storage paths.
+- The Ansible roles are implemented and tested in containers of each
+  supported operating system. None has run on a real host; starting k3s,
+  Cilium, firewall enforcement, and a remote deployment end to end are not
+  exercised. See [08-ansible.md](08-ansible.md#verification-limits).
 - The gateway selects a stable backend tenant ID for each authorized
   customer/datastream pair. Clients cannot choose arbitrary tenant IDs.
 - Raw backend endpoints and storage remain private. Kubernetes uses

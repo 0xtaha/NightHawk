@@ -1,0 +1,51 @@
+# Only reached when the operator asked for automatic security updates.
+- name: Install unattended upgrades (Debian family)
+  ansible.builtin.package:
+    name: unattended-upgrades
+    state: present
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Turn unattended upgrades on (Debian family)
+  ansible.builtin.copy:
+    content: |
+      // Managed by the NightHawk hardening role.
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    owner: root
+    group: root
+    mode: "0644"
+  when: ansible_facts['os_family'] == 'Debian'
+
+- name: Install automatic updates (RHEL family)
+  ansible.builtin.package:
+    name: dnf-automatic
+    state: present
+  register: hardening_updates_installed
+  when: ansible_facts['os_family'] == 'RedHat'
+
+- name: Limit automatic updates to security fixes and apply them (RHEL family)
+  community.general.ini_file:
+    path: /etc/dnf/automatic.conf
+    section: commands
+    option: "{{ item.option }}"
+    value: "{{ item.value }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - { option: upgrade_type, value: security }
+    - { option: apply_updates, value: "yes" }
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    # In a dry run the package was not installed, so its files are not there yet.
+    - not (ansible_check_mode and hardening_updates_installed is changed)
+
+- name: Enable the automatic update timer (RHEL family)
+  ansible.builtin.service:
+    name: dnf-automatic.timer
+    enabled: true
+    state: started
+  when:
+    - ansible_facts['os_family'] == 'RedHat'
+    - not (ansible_check_mode and hardening_updates_installed is changed)

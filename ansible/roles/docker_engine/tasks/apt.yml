@@ -1,0 +1,48 @@
+- name: Create the keyring directory
+  ansible.builtin.file:
+    path: "{{ docker_engine_keyring | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Convert the verified key for the package manager
+  ansible.builtin.command:
+    cmd: gpg --batch --yes --dearmor --output {{ docker_engine_keyring }} {{ docker_engine_key_path }}
+    creates: "{{ docker_engine_keyring }}"
+
+- name: Add the repository, trusted only through that key
+  ansible.builtin.copy:
+    content: |
+      # Managed by the NightHawk docker_engine role.
+      deb [arch={{ docker_engine_apt_architecture }} signed-by={{ docker_engine_keyring }}] {{ docker_engine_apt_source }}
+    dest: /etc/apt/sources.list.d/nighthawk-docker.list
+    owner: root
+    group: root
+    mode: "0644"
+  register: docker_engine_repository
+
+- name: Read the repository's package index
+  ansible.builtin.apt:
+    update_cache: true
+  changed_when: false
+
+- name: Install the pinned engine and Compose plugin
+  ansible.builtin.apt:
+    name:
+      - "docker-ce=5:{{ docker_engine_version }}-1~{{ docker_engine_apt_suffix }}"
+      - "docker-ce-cli=5:{{ docker_engine_version }}-1~{{ docker_engine_apt_suffix }}"
+      - "docker-compose-plugin={{ docker_engine_compose_version }}-1~{{ docker_engine_apt_suffix }}"
+      - containerd.io
+    state: present
+    allow_downgrade: "{{ docker_engine_allow_version_change | bool }}"
+    install_recommends: false
+  # The repository is only added for real, so a dry run cannot resolve the package.
+  when: not ansible_check_mode or docker_engine_repository is not changed
+
+- name: Hold the pinned version against unattended upgrades
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop: "{{ docker_engine_packages + ['docker-compose-plugin'] }}"
+  when: not ansible_check_mode or docker_engine_repository is not changed

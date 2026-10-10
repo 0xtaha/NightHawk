@@ -1,0 +1,16 @@
+# Order matters: nothing is written until every refusal has had its say, and nothing is
+# activated without a scheduled way back.
+- name: Validate the request before changing anything
+  ansible.builtin.import_tasks: validate.yml
+
+- name: Work out the rules for this host
+  ansible.builtin.import_tasks: plan.yml
+
+- name: Write the rule scripts
+  ansible.builtin.import_tasks: scripts.yml
+
+- name: Activate the rules with a way back
+  ansible.builtin.include_tasks: activate.yml
+  when:
+    - firewall_activate | bool
+    - firewall_plan_changed or firewall_scripts is changed

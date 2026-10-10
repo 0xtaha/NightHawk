@@ -1,0 +1,10 @@
+- name: Write a stand-in join token on the control machine
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Write the token file
+      ansible.builtin.copy:
+        content: not-a-real-join-token
+        dest: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/join-token"
+        mode: "0600"

@@ -1,0 +1,107 @@
+# Bootstrap or extend the k3s cluster of the self-hosted profile. See docs/08-ansible.md.
+# Nothing is changed on any node until every node passed both checks.
+- name: Check every node before changing any
+  hosts: k3s_servers:k3s_agents
+  gather_facts: true
+  any_errors_fatal: true
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  roles:
+    - role: preflight
+    - role: k3s_prerequisites
+
+- name: Prepare every node
+  hosts: k3s_servers:k3s_agents
+  gather_facts: true
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  roles:
+    - role: hardening
+    - role: firewall
+
+- name: Bootstrap the first server and the cluster network
+  hosts: k3s_servers[0]
+  gather_facts: true
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  roles:
+    - role: cilium
+    - role: k3s_node
+
+- name: Join further servers, one at a time
+  hosts: k3s_servers[1:]
+  gather_facts: true
+  serial: 1
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  roles:
+    - role: cilium
+    - role: k3s_node
+
+- name: Join the agents
+  hosts: k3s_agents
+  gather_facts: true
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  roles:
+    - role: k3s_node
+
+- name: Wait until every node is Ready
+  hosts: k3s_servers[0]
+  gather_facts: false
+  vars:
+    k3s_cluster_expected: "{{ (groups['k3s_servers'] + (groups['k3s_agents'] | default([]))) | length }}"
+    k3s_cluster_wait_seconds: 600
+  tasks:
+    - name: Ask the cluster for its nodes until all are Ready
+      ansible.builtin.command:
+        cmd: k3s kubectl get nodes --output json
+      register: k3s_cluster_nodes
+      changed_when: false
+      failed_when: false
+      until: >-
+        k3s_cluster_nodes.rc == 0
+        and (k3s_cluster_nodes.stdout | from_json)['items'] | length == k3s_cluster_expected | int
+        and (k3s_cluster_nodes.stdout | from_json)['items']
+            | map(attribute='status.conditions') | map('selectattr', 'type', 'equalto', 'Ready') | map('first')
+            | map(attribute='status') | unique | list == ['True']
+      retries: "{{ (k3s_cluster_wait_seconds | int / 10) | int }}"
+      delay: 10
+
+    - name: Fail, naming the nodes that are not Ready
+      ansible.builtin.fail:
+        msg: >-
+          After {{ k3s_cluster_wait_seconds }} seconds the cluster reports {{ k3s_cluster_reported | length }} of
+          {{ k3s_cluster_expected }} node(s). Not Ready:
+          {{ k3s_cluster_not_ready | join(', ') | default('unknown; run `k3s kubectl get nodes` on the first server', true) }}.
+      vars:
+        k3s_cluster_reported: >-
+          {{ (k3s_cluster_nodes.stdout | from_json)['items'] if k3s_cluster_nodes.rc | default(1) == 0 else [] }}
+        k3s_cluster_not_ready: >-
+          {%- set names = [] -%}
+          {%- for node in k3s_cluster_reported -%}
+          {%-   if node.status.conditions | selectattr('type', 'equalto', 'Ready') | map(attribute='status') | first != 'True' -%}
+          {%-     set _ = names.append(node.metadata.name) -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ names }}
+      when: k3s_cluster_reported | length != k3s_cluster_expected | int or k3s_cluster_not_ready | length > 0
+
+    - name: Read the administrative kubeconfig
+      ansible.builtin.slurp:
+        src: /etc/rancher/k3s/k3s.yaml
+      register: k3s_cluster_kubeconfig
+      no_log: true
+      when: k3s_fetch_kubeconfig_to | default('') | length > 0
+
+    - name: Write it on the control machine, for its owner only, addressed to this server
+      ansible.builtin.copy:
+        content: >-
+          {{ k3s_cluster_kubeconfig.content | b64decode
+             | replace('https://127.0.0.1:', 'https://' ~ (ansible_host | default(inventory_hostname)) ~ ':') }}
+        dest: "{{ k3s_fetch_kubeconfig_to }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      no_log: true
+      when: k3s_fetch_kubeconfig_to | default('') | length > 0

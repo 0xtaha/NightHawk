@@ -1,0 +1,15 @@
+galaxy_info:
+  role_name: hardening
+  namespace: nighthawk
+  author: NightHawk
+  description: A small, explicit set of host hardening settings that leaves workloads working.
+  license: Proprietary
+  min_ansible_version: "2.21"
+  platforms:
+    - name: Ubuntu
+      versions: [jammy, noble]
+    - name: Debian
+      versions: [bookworm]
+    - name: EL
+      versions: ["9"]
+dependencies: []

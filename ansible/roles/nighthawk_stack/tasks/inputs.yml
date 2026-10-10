@@ -1,0 +1,39 @@
+- name: Look for the rendered deployment on the control machine
+  ansible.builtin.stat:
+    path: "{{ nighthawk_rendered_dir }}/{{ item }}"
+  loop:
+    - compose.env
+    - deployment.json
+  delegate_to: localhost
+  become: false
+  register: nighthawk_stack_rendered
+
+- name: Refuse to deploy what was not rendered for a host
+  ansible.builtin.assert:
+    that: nighthawk_stack_rendered.results | map(attribute='stat.exists') | min
+    fail_msg: >-
+      {{ nighthawk_rendered_dir }} holds no rendered deployment. Run
+      `python -m nighthawk render-docker-deployment` first and point nighthawk_rendered_dir and
+      nighthawk_secrets_dir at its output. Nothing was copied.
+    quiet: true
+
+- name: Read the deployment's manifest and Compose environment
+  ansible.builtin.set_fact:
+    nighthawk_stack_manifest: "{{ lookup('ansible.builtin.file', nighthawk_rendered_dir ~ '/deployment.json') | from_json }}"
+    nighthawk_stack_environment: >-
+      {{ dict(lookup('ansible.builtin.file', nighthawk_rendered_dir ~ '/compose.env').splitlines() | map('split', '=', 1)) }}
+
+- name: Refuse a deployment rendered for other paths or another address
+  ansible.builtin.assert:
+    that:
+      - nighthawk_stack_environment.NIGHTHAWK_RENDERED_DIR == nighthawk_stack_rendered_target
+      - nighthawk_stack_environment.NIGHTHAWK_SECRETS_DIR == nighthawk_stack_secrets_target
+      - nighthawk_stack_environment.NIGHTHAWK_EXTERNAL_BIND_ADDRESS | default('') == nighthawk_external_bind_address
+    fail_msg: >-
+      The deployment in {{ nighthawk_rendered_dir }} was rendered for
+      {{ nighthawk_stack_environment.NIGHTHAWK_RENDERED_DIR }} and the external address
+      {{ nighthawk_stack_environment.NIGHTHAWK_EXTERNAL_BIND_ADDRESS | default('none') }}, but this host uses
+      {{ nighthawk_stack_rendered_target }} and {{ nighthawk_external_bind_address }}. Render it again with
+      `--remote-dir {{ nighthawk_stack_dir }} --external-bind-address {{ nighthawk_external_bind_address }}`.
+      Nothing was copied.
+    quiet: true

@@ -1,0 +1,37 @@
+- name: "Apply the role and expect a refusal: {{ firewall_test_case.name }}"
+  block:
+    - name: Run the firewall role with one thing wrong
+      ansible.builtin.include_role:
+        name: firewall
+      vars:
+        firewall_state_dir: "/tmp/firewall-{{ firewall_test_case.name }}"
+        firewall_script_dir: "/tmp/firewall-{{ firewall_test_case.name }}-scripts"
+        firewall_connection_address: "{{ (firewall_test_good | combine(firewall_test_case.change)).firewall_connection_address }}"
+        firewall_admin_allowlist: "{{ (firewall_test_good | combine(firewall_test_case.change)).firewall_admin_allowlist }}"
+        firewall_collector_allowlist: "{{ (firewall_test_good | combine(firewall_test_case.change)).firewall_collector_allowlist }}"
+        firewall_requested_ports: "{{ (firewall_test_good | combine(firewall_test_case.change)).firewall_requested_ports }}"
+
+    - name: This must not be reached
+      ansible.builtin.fail:
+        msg: "The firewall role accepted {{ firewall_test_case.name }}."
+  rescue:
+    - name: It refused for the right reason and said nothing was changed
+      ansible.builtin.assert:
+        that:
+          - firewall_test_case.expect in firewall_test_message
+          - "'The firewall was not changed' in firewall_test_message or 'the firewall was not changed' in firewall_test_message"
+      vars:
+        # A check over several rules reports per rule; the reason is in the item that failed.
+        firewall_test_message: >-
+          {{ ([ansible_failed_result.msg | default('')]
+              + (ansible_failed_result.results | default([]) | selectattr('msg', 'defined') | map(attribute='msg') | list))
+             | join(' ') }}
+
+- name: Look for anything it wrote
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: firewall_test_written
+  failed_when: firewall_test_written.stat.exists
+  loop:
+    - "/tmp/firewall-{{ firewall_test_case.name }}"
+    - "/tmp/firewall-{{ firewall_test_case.name }}-scripts"

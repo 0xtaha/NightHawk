@@ -1,0 +1,160 @@
+- name: The listed settings hold
+  hosts: all
+  gather_facts: true
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  vars:
+    nighthawk_host_role: docker_host
+    hardening_ssh_user: root
+    hardening_apply_sysctl_now: false
+  tasks:
+    - name: Ask sshd for its effective configuration
+      ansible.builtin.command:
+        cmd: sshd -T
+      register: hardening_test_effective
+      changed_when: false
+
+    - name: Key-only SSH, despite the distribution fragment that allowed passwords
+      ansible.builtin.assert:
+        that:
+          - "'passwordauthentication no' in hardening_test_effective.stdout"
+          - "'kbdinteractiveauthentication no' in hardening_test_effective.stdout"
+          - "'pubkeyauthentication yes' in hardening_test_effective.stdout"
+          - "'permitrootlogin without-password' in hardening_test_effective.stdout or 'permitrootlogin prohibit-password' in hardening_test_effective.stdout"
+
+    - name: Read the kernel settings file
+      ansible.builtin.slurp:
+        src: /etc/sysctl.d/90-nighthawk.conf
+      register: hardening_test_sysctl_file
+
+    - name: It holds exactly the rendered settings for a Docker host
+      ansible.builtin.assert:
+        that:
+          - >-
+            hardening_test_sysctl_file.content | b64decode | split('\n') | reject('match', '^(#.*)?$') | list | sort
+            == nighthawk.sysctl.docker_host | dictsort | map('join', ' = ') | list | sort
+          - "'net.ipv4.ip_forward = 1' in hardening_test_sysctl_file.content | b64decode"
+
+    - name: Gather service state
+      ansible.builtin.service_facts:
+
+    - name: Time synchronization is enabled
+      ansible.builtin.assert:
+        that:
+          - >-
+            ansible_facts.services[('chronyd' if ansible_facts['os_family'] == 'RedHat' else 'systemd-timesyncd') ~ '.service'].status
+            == 'enabled'
+
+    - name: Automatic updates were not asked for and were not configured
+      ansible.builtin.stat:
+        path: "{{ '/etc/dnf/automatic.conf' if ansible_facts['os_family'] == 'RedHat' else '/etc/apt/apt.conf.d/20auto-upgrades' }}"
+      register: hardening_test_updates
+      failed_when: hardening_test_updates.stat.exists
+
+- name: A cluster node keeps forwarding and a compatible reverse-path filter
+  hosts: all
+  gather_facts: true
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  vars:
+    nighthawk_host_role: cluster_server
+    hardening_ssh_user: root
+    hardening_apply_sysctl_now: false
+    hardening_sysctl_file: /tmp/cluster-sysctl.conf
+  tasks:
+    - name: Render the kernel settings for a cluster server
+      ansible.builtin.include_role:
+        name: hardening
+
+    - name: Read them
+      ansible.builtin.slurp:
+        src: /tmp/cluster-sysctl.conf
+      register: hardening_test_cluster_sysctl
+
+    - name: Forwarding on, strict reverse-path filtering off
+      ansible.builtin.assert:
+        that:
+          - "'net.ipv4.ip_forward = 1' in hardening_test_cluster_sysctl.content | b64decode"
+          - "'net.ipv4.conf.all.rp_filter = 0' in hardening_test_cluster_sysctl.content | b64decode"
+
+- name: An account without a key is not locked out
+  hosts: all
+  gather_facts: true
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  vars:
+    nighthawk_host_role: docker_host
+    hardening_ssh_user: keyless
+    hardening_apply_sysctl_now: false
+    hardening_sshd_fragment: /etc/ssh/sshd_config.d/01-keyless-test.conf
+  tasks:
+    - name: Create an account that has no authorized key
+      ansible.builtin.user:
+        name: keyless
+        create_home: true
+
+    - name: Apply hardening for that account and expect a refusal
+      block:
+        - name: Harden
+          ansible.builtin.include_role:
+            name: hardening
+        - name: This must not be reached
+          ansible.builtin.fail:
+            msg: Hardening disabled password authentication for an account without a key.
+      rescue:
+        - name: It refused for the right reason
+          ansible.builtin.assert:
+            that:
+              - "'has no authorized SSH key' in ansible_failed_result.msg"
+
+    - name: Look for the fragment it would have written
+      ansible.builtin.stat:
+        path: /etc/ssh/sshd_config.d/01-keyless-test.conf
+      register: hardening_test_refused_fragment
+      failed_when: hardening_test_refused_fragment.stat.exists
+
+- name: A configuration sshd refuses is rolled back
+  hosts: all
+  gather_facts: true
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  vars:
+    nighthawk_host_role: docker_host
+    hardening_ssh_user: root
+    hardening_apply_sysctl_now: false
+    hardening_sshd_extra_lines:
+      - ThisIsNotAnSshdOption yes
+  tasks:
+    - name: Remember the working fragment
+      ansible.builtin.slurp:
+        src: /etc/ssh/sshd_config.d/00-nighthawk.conf
+      register: hardening_test_before
+
+    - name: Apply a broken setting and expect a refusal
+      block:
+        - name: Harden
+          ansible.builtin.include_role:
+            name: hardening
+        - name: This must not be reached
+          ansible.builtin.fail:
+            msg: An invalid sshd configuration was accepted.
+      rescue:
+        - name: It refused for the right reason
+          ansible.builtin.assert:
+            that:
+              - "'sshd refused the new configuration' in ansible_failed_result.msg"
+
+    - name: Read the fragment again
+      ansible.builtin.slurp:
+        src: /etc/ssh/sshd_config.d/00-nighthawk.conf
+      register: hardening_test_after
+
+    - name: The previous fragment is back and sshd still accepts the configuration
+      ansible.builtin.assert:
+        that:
+          - hardening_test_after.content == hardening_test_before.content
+
+    - name: Validate the configuration
+      ansible.builtin.command:
+        cmd: sshd -t
+      changed_when: false

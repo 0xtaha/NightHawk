@@ -1,0 +1,61 @@
+# Shared by every role scenario. Run scenarios with ansible/molecule/run.sh, which renders the
+# inputs, sets the environment below, and passes this file to Molecule.
+dependency:
+  name: galaxy
+  enabled: false
+driver:
+  name: podman
+# Role tests start services and read kernel settings; no platform is privileged.
+platforms:
+  - name: nh-ubuntu-2204
+    image: localhost/nighthawk-test/ubuntu:22.04
+    pre_build_image: true
+    systemd: always
+    command: /lib/systemd/systemd
+  - name: nh-ubuntu-2404
+    image: localhost/nighthawk-test/ubuntu:24.04
+    pre_build_image: true
+    systemd: always
+    command: /lib/systemd/systemd
+  - name: nh-debian-12
+    image: localhost/nighthawk-test/debian:12
+    pre_build_image: true
+    systemd: always
+    command: /lib/systemd/systemd
+  - name: nh-rocky-9
+    image: localhost/nighthawk-test/rocky:9
+    pre_build_image: true
+    systemd: always
+    command: /usr/sbin/init
+  - name: nh-almalinux-9
+    image: localhost/nighthawk-test/almalinux:9
+    pre_build_image: true
+    systemd: always
+    command: /usr/sbin/init
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      interpreter_python: auto_silent
+      result_format: yaml
+  inventory:
+    group_vars:
+      all:
+        # The rendered inputs, as an operator's inventory names them.
+        nighthawk_inputs_file: ${NIGHTHAWK_INPUTS_FILE}
+  env:
+    ANSIBLE_ROLES_PATH: ${NIGHTHAWK_ANSIBLE_DIR}/roles
+    ANSIBLE_COLLECTIONS_PATH: ${NIGHTHAWK_ANSIBLE_DIR}/.collections
+verifier:
+  name: ansible
+scenario:
+  # `check` is a dry run of converge against the untouched host; `idempotence` is the second run.
+  test_sequence:
+    - destroy
+    - create
+    - prepare
+    - check
+    - converge
+    - idempotence
+    - verify
+    - destroy

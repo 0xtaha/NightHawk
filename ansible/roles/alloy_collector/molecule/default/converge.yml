@@ -1,0 +1,16 @@
+- name: Install the collector as a host service
+  hosts: all
+  gather_facts: true
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  vars:
+    alloy_collector_test_root: "{{ lookup('ansible.builtin.env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/collector"
+    alloy_collector_rendered_dir: "{{ lookup('ansible.builtin.env', 'NIGHTHAWK_COLLECTOR_DIR') }}"
+    alloy_collector_credential_file: "{{ alloy_collector_test_root }}/credential"
+    alloy_collector_gateway_ca_file: "{{ alloy_collector_test_root }}/gateway-ca.pem"
+    alloy_collector_certificate_dir: "{{ alloy_collector_test_root }}/certificates"
+    alloy_collector_credential_id: example-ingest
+    # No Vault here: the certificate is the stand-in written by prepare.yml.
+    alloy_collector_issue_certificate: false
+  roles:
+    - role: alloy_collector

@@ -181,18 +181,98 @@ secrets_store:
       repository: docker.io/hashicorp/vault
       tag: "2.1.2"
       digest: sha256:c2f666266f383d2cf424d86b8bb8ce7d065562173ffec2b476d762943608bb55
+# What the Ansible automation is developed and checked with. Runtime code does not need these.
+# Resolved from PyPI and Ansible Galaxy on 2026-10-10.
+automation_tools:
+  ansible_core:
+    version: 2.21.5
+    source: https://pypi.org/project/ansible-core/2.21.5/
+    runtime_verified: false
+  ansible_lint:
+    version: 26.9.0
+    source: https://pypi.org/project/ansible-lint/26.9.0/
+    runtime_verified: false
+  molecule:
+    version: 26.9.0
+    source: https://pypi.org/project/molecule/26.9.0/
+    runtime_verified: false
+  molecule_plugins:
+    version: 26.9.28
+    source: https://pypi.org/project/molecule-plugins/26.9.28/
+    runtime_verified: false
+  # Keyed without dots so a pin can be addressed by path; `name` is the collection's own name.
+  collections:
+    ansible_posix:
+      name: ansible.posix
+      version: 2.2.2
+      source: https://galaxy.ansible.com/ui/repo/published/ansible/posix/
+    community_general:
+      name: community.general
+      version: 13.5.0
+      source: https://galaxy.ansible.com/ui/repo/published/community/general/
+    # Only the role tests use this one, through Molecule's Podman driver.
+    containers_podman:
+      name: containers.podman
+      version: 1.21.1
+      source: https://galaxy.ansible.com/ui/repo/published/containers/podman/
+# What a role downloads and installs on a host. A binary has a checksum per supported
+# architecture; a package repository has the fingerprint of the key that signs it.
+host_artifacts:
+  docker_engine:
+    version: 29.9.0
+    compose_plugin_version: 5.6.0
+    source: https://docs.docker.com/engine/release-notes/29/
+    runtime_verified: false
+    # Docker signs its apt and rpm repositories with different keys. Fingerprints computed on
+    # 2026-10-10 from https://download.docker.com/linux/{ubuntu,debian,centos}/gpg.
+    signing_key_fingerprints:
+      apt: 9DC858229FC7DD38854AE2D88D81803C0EBFCD88
+      rpm: 060A61C51B558A7F742B77AAC52FEB6B621E9F35
+  # Version: kubernetes_platform.k3s. From the release's sha256sum-<arch>.txt.
+  k3s:
+    sha256:
+      linux_amd64: 92b94582eb7b34a8cf532e6006842b9ed215a6783cf56a3dd6271fd35243b2c0
+      linux_arm64: a1561ca4aef8b99f5588a840d4468ac39c8c1cd92470bbcb9634823fa221741a
+  # Version: collectors.alloy. From the release's SHA256SUMS, for alloy-linux-<arch>.zip.
+  alloy:
+    sha256:
+      linux_amd64: 451fe650e8277d22d69cb8db50bba809f581fe78decba7fce4027ef185457be9
+      linux_arm64: 396827d58158f181c98d5776c908348b38b4099f1d18a1e7554f2fda0fcb9203
+# `evidence` says what each entry rests on: `container` (role tests ran in a container of that
+# system), `host` (a playbook ran on a real machine), or `declared` (nothing yet).
 os_support:
+  # Docker and collector hosts. `container`: on 2026-10-10 the preflight, hardening, firewall,
+  # docker_engine, nighthawk_stack, and alloy_collector scenarios passed in a systemd container
+  # of every version listed, on amd64, under rootless Podman. That covers package installation
+  # (the pinned Docker Engine really installs on each), file and service configuration, the
+  # refusals, idempotence, and check mode. It does not cover firewall enforcement, loading kernel
+  # settings, starting the Docker daemon, or arm64. No entry is `host`: no playbook has run on
+  # a real machine. See docs/08-ansible.md, "Verification limits".
   docker_hosts:
     - distribution: ubuntu
       versions: ["22.04", "24.04"]
       architectures: ["amd64", "arm64"]
+      evidence: container
     - distribution: debian
       versions: ["12"]
       architectures: ["amd64", "arm64"]
+      evidence: container
+    - distribution: rocky
+      versions: ["9"]
+      architectures: ["amd64", "arm64"]
+      evidence: container
+    - distribution: almalinux
+      versions: ["9"]
+      architectures: ["amd64", "arm64"]
+      evidence: container
+  # `container` here is weaker than above: the k3s_prerequisites, k3s_node, and cilium scenarios
+  # passed in containers of both versions (verified binary, configuration, unit, manifest), but
+  # k3s was never started, no node joined, and Cilium never ran. Those need real machines.
   k3s_nodes:
     - distribution: ubuntu
       versions: ["22.04", "24.04"]
       architectures: ["amd64", "arm64"]
+      evidence: container
 tracked_consumers:
   - path: terraform/modules/object-storage/versions.tf
     pattern: 'required_version\s*=\s*"=\s*([0-9.]+)"'
@@ -305,3 +385,24 @@ tracked_consumers:
   - path: docker-compose/nighthawk.Dockerfile
     pattern: 'docker\.io/library/python:[^@\s]+@(sha256:[0-9a-f]{64})'
     component: container_images.python_base.digest
+  - path: ansible/requirements-dev.txt
+    pattern: '(?m)^ansible-core==([0-9.]+)$'
+    component: automation_tools.ansible_core.version
+  - path: ansible/requirements-dev.txt
+    pattern: '(?m)^ansible-lint==([0-9.]+)$'
+    component: automation_tools.ansible_lint.version
+  - path: ansible/requirements-dev.txt
+    pattern: '(?m)^molecule==([0-9.]+)$'
+    component: automation_tools.molecule.version
+  - path: ansible/requirements-dev.txt
+    pattern: '(?m)^molecule-plugins\[podman\]==([0-9.]+)$'
+    component: automation_tools.molecule_plugins.version
+  - path: ansible/requirements.yml
+    pattern: 'name: ansible\.posix\n\s+version: "([0-9.]+)"'
+    component: automation_tools.collections.ansible_posix.version
+  - path: ansible/requirements.yml
+    pattern: 'name: community\.general\n\s+version: "([0-9.]+)"'
+    component: automation_tools.collections.community_general.version
+  - path: ansible/requirements.yml
+    pattern: 'name: containers\.podman\n\s+version: "([0-9.]+)"'
+    component: automation_tools.collections.containers_podman.version

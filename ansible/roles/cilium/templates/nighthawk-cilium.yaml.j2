@@ -1,0 +1,27 @@
+# Managed by the NightHawk cilium role.
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: cilium
+  namespace: kube-system
+spec:
+  repo: {{ cilium_chart_repository }}
+  chart: cilium
+  version: {{ nighthawk.pins.cilium.version }}
+  targetNamespace: kube-system
+  # Installed before any node is Ready: there is no cluster network until this chart runs.
+  bootstrap: true
+  valuesContent: |-
+    k8sServiceHost: {{ cilium_api_host }}
+    k8sServicePort: {{ nighthawk.cluster.api_port }}
+    ipam:
+      mode: cluster-pool
+      operator:
+        clusterPoolIPv4PodCIDRList:
+          - {{ k3s_pod_cidr }}
+    routingMode: tunnel
+    tunnelProtocol: vxlan
+    tunnelPort: {{ nighthawk.cluster.overlay_port }}
+    MTU: {{ k3s_node_mtu }}
+    operator:
+      replicas: {{ cilium_operator_replicas }}

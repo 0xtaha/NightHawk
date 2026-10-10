@@ -1,0 +1,9 @@
+- name: Every supported system passes as a Docker host
+  hosts: all
+  gather_facts: true
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  vars:
+    nighthawk_host_role: docker_host
+  roles:
+    - role: preflight

@@ -1,0 +1,2 @@
+nighthawk_host_role: cluster_server
+k3s_storage_disks: []

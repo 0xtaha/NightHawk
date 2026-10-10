@@ -1,0 +1,8 @@
+# Managed by the NightHawk hardening role; changes here are overwritten.
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin prohibit-password
+{% for line in hardening_sshd_extra_lines %}
+{{ line }}
+{% endfor %}

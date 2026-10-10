@@ -152,3 +152,67 @@ rules:
     purpose: Grafana UI behind the gateway listener
     scope: private
     direction: source-to-destination
+  - id: ssh-administration
+    source: administrator
+    destination: host-ssh
+    protocol: tcp
+    port: 22
+    purpose: SSH administration of a host, from allowlisted addresses only
+    scope: restricted-external
+    direction: source-to-destination
+  - id: cluster-api-administration
+    source: administrator
+    destination: cluster-server
+    protocol: tcp
+    port: 6443
+    purpose: Kubernetes API for cluster administration, from allowlisted addresses only
+    scope: restricted-external
+    direction: source-to-destination
+  - id: cluster-api-server
+    source: cluster-node
+    destination: cluster-server
+    protocol: tcp
+    port: 6443
+    purpose: Kubernetes API server, from the cluster's own nodes
+    scope: private
+    direction: source-to-destination
+  - id: cluster-kubelet
+    source: cluster-node
+    destination: cluster-node
+    protocol: tcp
+    port: 10250
+    purpose: Kubelet API between cluster nodes
+    scope: private
+    direction: source-to-destination
+  - id: cluster-etcd-client
+    source: cluster-server
+    destination: cluster-server
+    protocol: tcp
+    port: 2379
+    purpose: Embedded etcd client traffic between servers
+    scope: private
+    direction: source-to-destination
+  - id: cluster-etcd-peer
+    source: cluster-server
+    destination: cluster-server
+    protocol: tcp
+    port: 2380
+    purpose: Embedded etcd peer traffic between servers
+    scope: private
+    direction: source-to-destination
+  - id: cluster-network-overlay
+    source: cluster-node
+    destination: cluster-node
+    protocol: udp
+    port: 8472
+    purpose: Cilium VXLAN overlay between cluster nodes
+    scope: private
+    direction: source-to-destination
+  - id: cluster-network-health
+    source: cluster-node
+    destination: cluster-node
+    protocol: tcp
+    port: 4240
+    purpose: Cilium health checks between cluster nodes
+    scope: private
+    direction: source-to-destination

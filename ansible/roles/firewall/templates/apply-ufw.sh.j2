@@ -1,0 +1,18 @@
+#!/bin/sh
+# Managed by the NightHawk firewall role for a {{ nighthawk_host_role }}. Rules come from
+# config/network.yaml through the rendered inputs; changes here are overwritten.
+set -eu
+if [ "${1:-}" = "--persist" ]; then
+    # UFW writes its rules to disk as they are added; enabling it also enables it at boot.
+    exit 0
+fi
+ufw --force reset
+ufw default deny incoming
+ufw default allow outgoing
+{% for rule in firewall_plan %}
+# {{ rule.id }}
+{% for source in rule.sources %}
+ufw allow proto {{ rule.protocol }} from {{ source }} to any port {{ rule.port }} comment '{{ rule.id }}'
+{% endfor %}
+{% endfor %}
+ufw --force enable

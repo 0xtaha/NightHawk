@@ -1,0 +1,11 @@
+# The account whose key authentication is verified before password authentication is disabled.
+hardening_ssh_user: "{{ ansible_user | default(ansible_facts['user_id']) }}"
+# Read before the distribution's own fragments: the first value sshd sees for a setting wins.
+hardening_sshd_fragment: /etc/ssh/sshd_config.d/00-nighthawk.conf
+# Extra sshd settings, one per line. They are validated with the rest.
+hardening_sshd_extra_lines: []
+hardening_sysctl_file: /etc/sysctl.d/90-nighthawk.conf
+# Load the kernel settings as soon as they are written. A test container cannot.
+hardening_apply_sysctl_now: true
+# Opt in to unattended installation of security updates.
+hardening_automatic_security_updates: false

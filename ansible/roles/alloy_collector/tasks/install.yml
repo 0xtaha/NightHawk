@@ -1,0 +1,72 @@
+# Each version is unpacked into its own directory; the binary on the path is a link to it.
+- name: Look for the pinned version
+  ansible.builtin.stat:
+    path: "{{ alloy_collector_install_dir }}/{{ alloy_collector_version }}/alloy-linux-{{ alloy_collector_architecture }}"
+  register: alloy_collector_installed
+
+- name: Download, verify, and unpack the pinned version
+  when: not alloy_collector_installed.stat.exists
+  block:
+    - name: Install what unpacking the archive needs
+      ansible.builtin.package:
+        name: unzip
+        state: present
+
+    - name: Create the directory for this version
+      ansible.builtin.file:
+        path: "{{ alloy_collector_install_dir }}/{{ alloy_collector_version }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Download the archive, keeping it only if its checksum matches the pin
+      ansible.builtin.get_url:
+        url: "{{ alloy_collector_download_base }}/v{{ alloy_collector_version }}/{{ alloy_collector_archive }}"
+        dest: "{{ alloy_collector_install_dir }}/{{ alloy_collector_archive }}"
+        checksum: "sha256:{{ alloy_collector_checksum }}"
+        owner: root
+        group: root
+        mode: "0644"
+      # A dry run does not fetch a large archive only to discard it.
+      when: not ansible_check_mode
+
+    - name: Unpack the verified archive
+      ansible.builtin.unarchive:
+        src: "{{ alloy_collector_install_dir }}/{{ alloy_collector_archive }}"
+        dest: "{{ alloy_collector_install_dir }}/{{ alloy_collector_version }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+      # In a dry run there is no archive to unpack.
+      when: not ansible_check_mode
+
+    - name: Remove the archive
+      ansible.builtin.file:
+        path: "{{ alloy_collector_install_dir }}/{{ alloy_collector_archive }}"
+        state: absent
+  rescue:
+    - name: Remove what was downloaded
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ alloy_collector_install_dir }}/{{ alloy_collector_archive }}"
+        - "{{ alloy_collector_install_dir }}/{{ alloy_collector_version }}"
+
+    - name: Fail, naming the artifact
+      ansible.builtin.fail:
+        msg: >-
+          {{ alloy_collector_archive }} {{ alloy_collector_version }} was not installed on {{ inventory_hostname }}:
+          {{ ansible_failed_result.msg | default('the download or the checksum comparison failed') }}
+          The pinned SHA-256 is {{ alloy_collector_checksum }}. Nothing was installed.
+
+- name: Point the collector's path at the pinned version
+  ansible.builtin.file:
+    src: "{{ alloy_collector_install_dir }}/{{ alloy_collector_version }}/alloy-linux-{{ alloy_collector_architecture }}"
+    dest: "{{ alloy_collector_binary }}"
+    state: link
+    # In a dry run on a new host the target does not exist yet.
+    force: "{{ ansible_check_mode }}"
+  notify: Restart the collector

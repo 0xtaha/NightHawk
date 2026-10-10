@@ -1,0 +1,102 @@
+- name: The pinned version is installed and held
+  hosts: all
+  gather_facts: true
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  tasks:
+    - name: Ask the client for its version
+      ansible.builtin.command:
+        cmd: docker --version
+      register: docker_engine_test_client
+      changed_when: false
+
+    - name: Ask the Compose plugin for its version
+      ansible.builtin.command:
+        cmd: docker compose version --short
+      register: docker_engine_test_compose
+      changed_when: false
+
+    - name: Both are the pinned versions
+      ansible.builtin.assert:
+        that:
+          - "'Docker version ' ~ nighthawk.pins.docker_engine.version in docker_engine_test_client.stdout"
+          - docker_engine_test_compose.stdout | trim == nighthawk.pins.docker_engine.compose_plugin_version
+
+    - name: Read installed packages
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: The engine package is the pinned version
+      ansible.builtin.assert:
+        that: nighthawk.pins.docker_engine.version in (ansible_facts['packages']['docker-ce'] | map(attribute='version') | join(' '))
+
+    - name: Read held packages (Debian family)
+      ansible.builtin.command:
+        cmd: apt-mark showhold
+      register: docker_engine_test_holds
+      changed_when: false
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Read locked packages (RHEL family)
+      ansible.builtin.command:
+        cmd: dnf versionlock list
+      register: docker_engine_test_locks
+      changed_when: false
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: The version is held
+      ansible.builtin.assert:
+        that: >-
+          'docker-ce' in (docker_engine_test_holds.stdout if ansible_facts['os_family'] == 'Debian'
+                          else docker_engine_test_locks.stdout)
+
+- name: A key with another fingerprint installs nothing
+  hosts: all
+  gather_facts: true
+  vars_files:
+    - "{{ nighthawk_inputs_file }}"
+  vars:
+    nighthawk_host_role: docker_host
+    docker_engine_manage_service: false
+    docker_engine_key_path: /tmp/wrong-key/docker.asc
+    docker_engine_keyring: /tmp/wrong-key/keyring.gpg
+    # A stand-in repository serving a real, well-formed key that is not Docker's.
+    docker_engine_repository_base: file:///tmp/wrong-key/repository
+    docker_engine_test_key_dir: >-
+      /tmp/wrong-key/repository/{{ 'centos' if ansible_facts['os_family'] == 'RedHat' else ansible_facts['distribution'] | lower }}
+  tasks:
+    - name: Create a stand-in repository that serves another key
+      ansible.builtin.file:
+        path: "{{ docker_engine_test_key_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Generate a throwaway signing key
+      ansible.builtin.shell:
+        cmd: |
+          set -e
+          export GNUPGHOME="$(mktemp -d)"
+          gpg --batch --passphrase '' --quick-generate-key 'Not Docker <not-docker@example.invalid>' ed25519 sign 1d
+          gpg --armor --export not-docker@example.invalid > "{{ docker_engine_test_key_dir }}/gpg"
+        creates: "{{ docker_engine_test_key_dir }}/gpg"
+
+    - name: Run the role against it and expect a refusal
+      block:
+        - name: Install from the stand-in repository
+          ansible.builtin.include_role:
+            name: docker_engine
+        - name: This must not be reached
+          ansible.builtin.fail:
+            msg: A repository key with another fingerprint was trusted.
+      rescue:
+        - name: It refused for the right reason
+          ansible.builtin.assert:
+            that:
+              - "'does not have the pinned fingerprint' in ansible_failed_result.msg"
+              - "'Nothing was installed from that repository' in ansible_failed_result.msg"
+
+    - name: Look for a keyring made from the refused key
+      ansible.builtin.stat:
+        path: /tmp/wrong-key/keyring.gpg
+      register: docker_engine_test_keyring
+      failed_when: docker_engine_test_keyring.stat.exists
