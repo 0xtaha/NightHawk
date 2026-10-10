@@ -1,6 +1,14 @@
 // Docker host: host and container resource metrics. Needs the Docker socket and
 // host mounts required by the cAdvisor exporter.
-prometheus.exporter.unix "host" { }
+//
+// The collector runs in a container, so the node exporter must be pointed at the host's
+// filesystems or it reports the container's. These paths match the mounts of the Compose
+// `alloy-host` service: the host root at /rootfs (which carries /proc) and the host /sys.
+prometheus.exporter.unix "host" {
+	rootfs_path = "/rootfs"
+	procfs_path = "/rootfs/proc"
+	sysfs_path  = "/sys"
+}
 
 prometheus.scrape "host" {
 	targets    = prometheus.exporter.unix.host.targets

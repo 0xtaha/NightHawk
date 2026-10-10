@@ -3,11 +3,32 @@
   "$id": "urn:nighthawk:platform:1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "deployment", "profile", "gateway", "grafana", "storage", "secrets", "credentials", "tenants"],
+  "required": ["schema_version", "deployment", "profile", "vault", "gateway", "grafana", "storage", "secrets", "credentials", "tenants"],
   "properties": {
-    "schema_version": {"const": 1},
+    "schema_version": {"const": 2},
     "deployment": {"enum": ["docker", "self-hosted-k8s", "aws"]},
     "profile": {"enum": ["development", "production"]},
+    "vault": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["address", "kv_mount", "pki"],
+      "properties": {
+        "address": {"type": "string", "pattern": "^https?://[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$"},
+        "namespace": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*(/[A-Za-z0-9][A-Za-z0-9_-]*)*$"},
+        "ca_file": {"type": "string", "pattern": "^/[^\\s]+$"},
+        "kv_mount": {"$ref": "#/$defs/vault_path"},
+        "pki": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mount", "server_role", "client_role"],
+          "properties": {
+            "mount": {"$ref": "#/$defs/vault_path"},
+            "server_role": {"$ref": "#/$defs/id"},
+            "client_role": {"$ref": "#/$defs/id"}
+          }
+        }
+      }
+    },
     "gateway": {"$ref": "#/$defs/gateway"},
     "grafana": {
       "type": "object",
@@ -26,9 +47,9 @@
       "additionalProperties": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["file", "key"],
+        "required": ["path", "key"],
         "properties": {
-          "file": {"type": "string", "pattern": "^secrets/[a-zA-Z0-9_-]+\\.sops\\.(yaml|json)$"},
+          "path": {"$ref": "#/$defs/vault_path"},
           "key": {"type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9_-]*$"}
         }
       }
@@ -104,6 +125,7 @@
   },
   "$defs": {
     "id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}$"},
+    "vault_path": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*(/[a-z0-9][a-z0-9_-]*)*$"},
     "signal": {
       "type": "object",
       "additionalProperties": false,
@@ -129,13 +151,11 @@
     "gateway": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["hostname", "entry_points", "grafana_entry_point", "client_ca_secret_ref", "auth_service", "upstreams", "revoked_certificate_fingerprints"],
+      "required": ["hostname", "entry_points", "grafana_entry_point", "auth_service", "upstreams", "revoked_certificate_fingerprints"],
       "properties": {
         "hostname": {"$ref": "#/$defs/hostname"},
         "entry_points": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
         "grafana_entry_point": {"$ref": "#/$defs/id"},
-        "client_ca_secret_ref": {"$ref": "#/$defs/id"},
-        "client_ca_key_secret_ref": {"$ref": "#/$defs/id"},
         "auth_service": {"$ref": "#/$defs/origin"},
         "upstreams": {
           "type": "object",
@@ -195,6 +215,7 @@
           "required": ["enabled", "ca_secret_ref"],
           "properties": {
             "enabled": {"const": true},
+            "trust": {"enum": ["system", "pki", "secret"]},
             "ca_secret_ref": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/id"}]}
           }
         },

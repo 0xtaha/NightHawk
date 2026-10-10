@@ -8,10 +8,10 @@ locals {
   # "aws-", e.g. "aws-s3"; scope alone is not the right filter since
   # "backend-object-storage" and "remote-gateway" are Docker/self-hosted
   # traffic despite not being loopback scope - see design.md).
-  # tests/test_terraform_boundaries.py asserts this literal's rule count
-  # stays equal to the network contract's AWS-scoped rule count, so a
-  # future rule added to config/network.yaml that isn't mirrored here fails
-  # the test suite instead of silently under-provisioning security groups.
+  # tests/test_terraform_boundaries.py compares every field of every rule
+  # here with the network contract, so a rule that is added, removed, or
+  # changed in config/network.yaml without being mirrored fails the test
+  # suite instead of silently diverging.
   network_rules = [
     {
       id          = "aws-object-storage"
@@ -37,15 +37,23 @@ module "network" {
 module "eks" {
   source = "../../modules/aws-eks"
 
-  name_prefix           = var.name_prefix
-  vpc_id                = module.network.vpc_id
-  cluster_subnet_ids    = concat(module.network.public_subnet_ids, module.network.private_subnet_ids)
-  node_subnet_ids       = module.network.private_subnet_ids
-  cluster_version       = var.cluster_version
-  ebs_csi_addon_version = var.ebs_csi_addon_version
-  stateful_node_group   = var.stateful_node_group
-  stateless_node_group  = var.stateless_node_group
-  tags                  = var.tags
+  name_prefix        = var.name_prefix
+  cluster_subnet_ids = concat(module.network.public_subnet_ids, module.network.private_subnet_ids)
+  node_subnet_ids    = module.network.private_subnet_ids
+  # Every node carries the groups derived from the network contract.
+  node_security_group_ids      = values(module.network.security_group_ids)
+  endpoint_public_access       = var.endpoint_public_access
+  public_access_cidrs          = var.public_access_cidrs
+  cluster_admin_principal_arns = var.cluster_admin_principal_arns
+  secrets_kms_key_arn          = var.secrets_kms_key_arn
+  dns_controller               = var.dns_controller
+  certificate_controller       = var.certificate_controller
+  autoscaler_controller        = var.autoscaler_controller
+  cluster_version              = var.cluster_version
+  ebs_csi_addon_version        = var.ebs_csi_addon_version
+  stateful_node_group          = var.stateful_node_group
+  stateless_node_group         = var.stateless_node_group
+  tags                         = var.tags
 }
 
 output "vpc_id" {
@@ -86,4 +94,24 @@ output "cluster_name" {
 output "cluster_endpoint" {
   description = "EKS cluster API server endpoint."
   value       = module.eks.cluster_endpoint
+}
+
+output "cluster_security_group_id" {
+  description = "Security group EKS creates for the cluster."
+  value       = module.eks.cluster_security_group_id
+}
+
+output "secrets_kms_key_arn" {
+  description = "KMS key that encrypts Kubernetes secrets."
+  value       = module.eks.secrets_kms_key_arn
+}
+
+output "controller_role_arns" {
+  description = "IRSA role ARN per enabled controller, for the later workload installation."
+  value       = module.eks.controller_role_arns
+}
+
+output "node_security_group_ids" {
+  description = "Security groups attached to every node: the cluster's own group and the contract-derived groups."
+  value       = module.eks.node_security_group_ids
 }

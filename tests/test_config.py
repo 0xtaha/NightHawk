@@ -44,7 +44,7 @@ class ConfigurationTests(unittest.TestCase):
         for permission in ("ingest", "query"):
             credential_id = f"{tenant_id}-{stream_id}-{permission}"
             self.data["secrets"][credential_id] = {
-                "file": "secrets/local.sops.yaml", "key": credential_id,
+                "path": "nighthawk/local", "key": credential_id,
             }
             self.data["credentials"].append({
                 "id": credential_id, "secret_ref": credential_id,
@@ -159,7 +159,7 @@ class ConfigurationTests(unittest.TestCase):
     def test_duplicate_certificate_fails(self) -> None:
         extra = copy.deepcopy(self.data["credentials"][0])
         extra.update(id="extra", secret_ref="extra")
-        self.data["secrets"]["extra"] = {"file": "secrets/local.sops.yaml", "key": "extra"}
+        self.data["secrets"]["extra"] = {"path": "nighthawk/local", "key": "extra"}
         self.data["credentials"].append(extra)
         self.assert_invalid("duplicate certificate identity")
 
@@ -193,9 +193,21 @@ class ConfigurationTests(unittest.TestCase):
                 with self.assertRaises(ConfigurationError):
                     load_platform(self.write())
 
-    def test_unknown_ca_fails(self) -> None:
-        self.data["storage"]["bindings"]["tempo-traces"]["tls"]["ca_secret_ref"] = "unknown"
-        self.assert_invalid("unknown secret")
+    def test_local_storage_is_trusted_through_the_platform_pki(self) -> None:
+        platform = load_platform(self.write())
+        self.assertEqual({binding.tls.trust for binding in platform.bindings.values()}, {"pki"})
+        for trust in ("system", None):
+            with self.subTest(trust=trust):
+                tls = self.data["storage"]["bindings"]["tempo-traces"]["tls"]
+                tls.pop("trust", None) if trust is None else tls.update(trust=trust)
+                self.assert_invalid("requires tls.trust: pki")
+
+    def test_stored_ca_reference_and_trust_must_agree(self) -> None:
+        tls = self.data["storage"]["bindings"]["tempo-traces"]["tls"]
+        tls["ca_secret_ref"] = "grafana-admin"
+        self.assert_invalid("only for, tls.trust: secret")
+        tls.update(trust="secret", ca_secret_ref=None)
+        self.assert_invalid("only for, tls.trust: secret")
 
     def test_storage_identities_are_separated_by_backend(self) -> None:
         self.data["storage"]["bindings"]["tempo-traces"]["identity"]["ref"] = "mimir-storage"
@@ -214,11 +226,24 @@ class ConfigurationTests(unittest.TestCase):
             binding["capabilities"]["workload_identity"] = True
             binding["endpoint"] = "https://s3.eu-west-1.amazonaws.com"
             binding["region"] = "eu-west-1"
-            binding["tls"]["ca_secret_ref"] = None
+            # As `terraform output -json storage` emits it: no trust field, no private CA.
+            binding["tls"] = {"enabled": True, "ca_secret_ref": None}
             binding["force_path_style"] = False
         platform = load_platform(self.write())
         self.assertEqual(platform.storage_provider, "aws")
         self.assertEqual(platform.bindings["tempo-traces"].identity.type, "irsa")
+        self.assertEqual(platform.bindings["tempo-traces"].tls.trust, "system")
+        tls = self.data["storage"]["bindings"]["tempo-traces"]["tls"]
+        tls["ca_secret_ref"] = "unknown"
+        self.assert_invalid("unknown secret")
+        self.data["secrets"]["private-ca"] = {"path": "nighthawk/local", "key": "private-ca"}
+        tls["ca_secret_ref"] = "private-ca"
+        self.assertEqual(load_platform(self.write()).bindings["tempo-traces"].tls.trust, "secret")
+        tls["ca_secret_ref"] = "example-ingest"
+        self.assert_invalid("storage CA references must not reuse")
+        tls.update(trust="pki", ca_secret_ref=None)
+        self.assert_invalid("only local storage may use it")
+        tls.pop("trust")
         self.data["storage"]["bindings"]["tempo-traces"]["identity"]["ref"] = "not-an-arn"
         self.assert_invalid("IRSA role ARN")
 
@@ -286,13 +311,72 @@ class ConfigurationTests(unittest.TestCase):
         self.data["gateway"]["revoked_certificate_fingerprints"] = ["AB:CD"]
         self.assert_invalid("revoked_certificate_fingerprints.0")
 
-    def test_unknown_gateway_ca_fails(self) -> None:
-        self.data["gateway"]["client_ca_secret_ref"] = "missing"
-        self.assert_invalid("unknown secret")
+    def test_certificate_authority_references_are_rejected(self) -> None:
+        for field in ("client_ca_secret_ref", "client_ca_key_secret_ref"):
+            with self.subTest(field=field):
+                data = copy.deepcopy(self.data)
+                data["gateway"][field] = "grafana-admin"
+                with self.assertRaisesRegex(ConfigurationError, field):
+                    load_platform(self.write(data))
 
-    def test_gateway_ca_cannot_reuse_a_credential_secret(self) -> None:
-        self.data["gateway"]["client_ca_secret_ref"] = "example-ingest"
-        self.assert_invalid("gateway CA references must not reuse")
+    def test_vault_section_is_loaded(self) -> None:
+        vault = load_platform(self.write()).vault
+        self.assertEqual(
+            (vault.address, vault.kv_mount, vault.pki_mount, vault.server_role, vault.client_role),
+            ("http://127.0.0.1:8200", "nighthawk-kv", "nighthawk-pki", "nighthawk-server", "nighthawk-collector"),
+        )
+        self.assertTrue(vault.loopback and vault.plaintext)
+        self.assertIsNone(vault.namespace)
+        del self.data["vault"]
+        self.assert_invalid("'vault' is a required property")
+
+    def test_plaintext_vault_address_is_loopback_only(self) -> None:
+        for address in ("http://vault.example.com:8200", "http://10.0.0.5:8200"):
+            with self.subTest(address=address):
+                self.data["vault"]["address"] = address
+                self.assert_invalid(f"{address} is plaintext")
+        for address in ("http://localhost:8200", "http://127.0.0.1:8200", "https://vault.example.com:8200", "https://vault.example.com"):
+            with self.subTest(address=address):
+                self.data["vault"]["address"] = address
+                load_platform(self.write())
+
+    def test_production_refuses_a_plaintext_or_loopback_vault(self) -> None:
+        self.data["profile"] = "production"
+        for address in ("http://127.0.0.1:8200", "https://127.0.0.1:8200", "https://localhost:8200"):
+            with self.subTest(address=address):
+                self.data["vault"]["address"] = address
+                self.assert_invalid("production refuses the plaintext or loopback address")
+        self.data["vault"]["address"] = "https://vault.example.com:8200"
+        self.assertEqual(load_platform(self.write()).profile, "production")
+
+    def test_vault_mounts_and_roles_must_be_distinct(self) -> None:
+        self.data["vault"]["pki"]["mount"] = self.data["vault"]["kv_mount"]
+        self.assert_invalid("kv_mount and pki.mount must differ")
+        self.data["vault"]["pki"].update(mount="nighthawk-pki", client_role="nighthawk-server")
+        self.assert_invalid("server_role and pki.client_role must differ")
+
+    def test_vault_credentials_cannot_be_declared(self) -> None:
+        for field in ("token", "role_id", "secret_id"):
+            with self.subTest(field=field):
+                data = copy.deepcopy(self.data)
+                data["vault"][field] = "x"
+                with self.assertRaisesRegex(ConfigurationError, field):
+                    load_platform(self.write(data))
+
+    def test_version_one_document_is_rejected_with_what_changed(self) -> None:
+        self.data["schema_version"] = 1
+        self.assert_invalid("schema_version 1 is no longer supported.*vault.*\\{path, key\\}.*client_ca_secret_ref")
+
+    def test_secret_references_name_a_vault_path_and_key(self) -> None:
+        platform = load_platform(self.write())
+        reference = platform.secrets["example-ingest"]
+        self.assertEqual((reference.path, reference.key), ("nighthawk/local", "example-ingest"))
+        self.data["secrets"]["example-ingest"] = {"file": "secrets/local.sops.yaml", "key": "example-ingest"}
+        self.assert_invalid("'path' is a required property")
+        self.data["secrets"]["example-ingest"] = {"path": "/absolute", "key": "example-ingest"}
+        self.assert_invalid("secrets.example-ingest.path")
+        self.data["secrets"]["example-ingest"] = {"path": "nighthawk/local", "key": "example-query"}
+        self.assert_invalid("must not alias the same Vault path and key")
 
     def test_grafana_block_is_loaded_and_cross_checked(self) -> None:
         platform = load_platform(self.write())
@@ -323,7 +407,7 @@ class ConfigurationTests(unittest.TestCase):
         self.assert_invalid("drop_fields")
 
     def test_overlapping_credentials_for_one_pair_are_valid(self) -> None:
-        self.data["secrets"]["example-ingest-next"] = {"file": "secrets/local.sops.yaml", "key": "example-ingest-next"}
+        self.data["secrets"]["example-ingest-next"] = {"path": "nighthawk/local", "key": "example-ingest-next"}
         self.data["credentials"].append({
             "id": "example-ingest-next", "secret_ref": "example-ingest-next",
             "tenant": "example", "datastream": "application", "permission": "ingest",
@@ -402,7 +486,7 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(
             {path.name for path in first.iterdir()},
             {
-                "platform.json", "network.json", "ports.md", "unenforced-limits.json", "gateway", "grafana", "backends",
+                "platform.json", "network.json", "ports.md", "unenforced-limits.json", "gateway", "grafana", "backends", "vault",
                 "mimir-overrides.yaml", "loki-overrides.yaml", "tempo-overrides.yaml", "pyroscope-overrides.yaml",
             },
         )

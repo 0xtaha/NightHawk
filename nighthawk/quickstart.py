@@ -1,18 +1,21 @@
 """One-command local bring-up of the Docker Compose stack, and its teardown.
 
-Nothing is replaced: secrets, identities, the CA, and certificates are created only
-when missing. Rendered files are synchronized into stable directories file by file,
-because running containers keep those directories mounted.
+Secrets live in the Vault the platform document declares, which must already be running:
+the quickstart never starts, configures, or stores a credential for it. Nothing is replaced:
+secrets, identities, and certificates are created only when missing. Rendered files are
+synchronized into stable directories file by file, because running containers keep those
+directories mounted.
 """
 
 from __future__ import annotations
 
 import contextlib
 import datetime
+import hashlib
 import io
+import ipaddress
 import json
 import os
-import re
 import secrets as token_source
 import socket
 import subprocess
@@ -20,18 +23,22 @@ import tempfile
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 
 from cryptography import x509
+from cryptography.exceptions import InvalidSignature
 
-from nighthawk import collector, gateway, storage, trust
+from nighthawk import collector, gateway, grafana, storage, trust
 from nighthawk.config import ROOT, ConfigurationError, Platform, load_platform, load_versions
-from nighthawk.secrets import Runner, doctor, generate_recipient, materialize
-from nighthawk.tools import TOOLS_DIR
+from nighthawk.secrets import doctor, materialize, materialized_path, secret_exists, store_secret
+from nighthawk.vault import Auth, Client, Transport
+
+Runner = Callable[..., subprocess.CompletedProcess]
 
 COMPOSE_FILE = ROOT / "docker-compose" / "docker-compose.yaml"
 # Long-running services whose readiness the bring-up waits for; their dependencies follow.
 WAITED_SERVICES = ("grafana", "alloy")
+HOST_COLLECTION_PROFILE, HOST_COLLECTION_SERVICE = "host-collection", "alloy-host"
 RENEW_BEFORE = datetime.timedelta(days=7)
 
 
@@ -44,13 +51,18 @@ class Options:
     compose: tuple[str, ...] = ("docker", "compose")
     rendered_dir: Path = ROOT / ".generated" / "docker"
     secrets_dir: Path = ROOT / ".materialized-secrets"
-    age_key: Path = ROOT / "secrets" / "local.agekey"
-    tools_dir: Path = TOOLS_DIR
+    vault_auth: Auth = Auth()
+    # Injection points for tests; the defaults are the process environment and real HTTP.
+    environ: Mapping[str, str] | None = None
+    vault_transport: Transport | None = None
     tenant: str | None = None
     datastream: str | None = None
     collector_entry_point: str = "local-gateway"
     bind_address: str = "127.0.0.1"
-    ca_valid_days: int = 365
+    # Credential IDs to use where a datastream declares several of one permission.
+    credentials: tuple[str, ...] = ()
+    # Also run the host and container collector (Compose profile `host-collection`). Docker Engine only.
+    host_collection: bool = False
     certificate_valid_days: int = 90
     timeout: int = 600
     build: bool = True
@@ -58,10 +70,16 @@ class Options:
     created: list[str] = field(default_factory=list)
 
 
+VAULT_HELP = (
+    "start a development Vault and run `python -m nighthawk bootstrap-dev-vault`, "
+    "or supply a credential for your own; see docs/00-quickstart.md"
+)
+
+
 def _environment(options: Options) -> dict[str, str]:
-    environment = dict(os.environ)
-    environment["PATH"] = f"{options.tools_dir}{os.pathsep}{environment.get('PATH', '')}"
-    environment["SOPS_AGE_KEY_FILE"] = str(options.age_key)
+    """The environment of every child process. The Vault credential is not passed on to Compose."""
+    environment = dict(os.environ if options.environ is None else options.environ)
+    environment.pop("VAULT_TOKEN", None)
     return environment
 
 
@@ -83,8 +101,27 @@ def _compose(options: Options) -> list[str]:
     ]
 
 
+def _is_loopback(address: str) -> bool:
+    try:
+        return ipaddress.ip_address(address).is_loopback
+    except ValueError:
+        return False
+
+
+def local_entry_point(platform: Platform):
+    """The loopback-scoped entry point the Compose stack publishes."""
+    local = [entry for entry in platform.gateway.entry_points if entry.scope == "loopback"]
+    if len(local) != 1:
+        raise ConfigurationError(
+            "the quickstart publishes exactly one loopback-scoped gateway entry point; "
+            f"the platform document selects {len(local)}"
+        )
+    return local[0]
+
+
 def _port_is_free(address: str, port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+    family = socket.AF_INET6 if ":" in address else socket.AF_INET
+    with socket.socket(family, socket.SOCK_STREAM) as probe:
         probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             probe.bind((address, port))
@@ -103,8 +140,16 @@ def _stack_is_running(options: Options, runner: Runner) -> bool:
 def preflight(
     options: Options, platform: Platform, runner: Runner,
     port_is_free: Callable[[str, int], bool] = _port_is_free,
-) -> tuple[int, int]:
-    """Check every prerequisite before anything is written; return the UID and GID services run as."""
+) -> tuple[tuple[int, int], Client]:
+    """Check every prerequisite before anything is written; return the UID and GID services run as, and a Vault client."""
+    if not _is_loopback(options.bind_address):
+        # The published entry point is scoped `loopback` in the gateway policy, which admits
+        # ingestion without a client certificate. It must not be reachable from another machine.
+        raise ConfigurationError(
+            f"--bind-address {options.bind_address} is not a loopback address. The quickstart publishes the "
+            "local gateway entry point, which accepts ingestion without a client certificate; "
+            "publishing it beyond this machine is not supported."
+        )
     problems: list[str] = []
     for args, name in (([*options.compose, "version"], "the Compose command"), ([options.container, "info"], "the container runtime")):
         try:
@@ -112,9 +157,10 @@ def preflight(
                 problems.append(f"{name} ({' '.join(args)}) is not usable")
         except (OSError, subprocess.SubprocessError):
             problems.append(f"{name} ({' '.join(args)}) is not installed")
-    for check in doctor(load_versions(), runner=runner):
-        if not check.ok:
-            problems.append(f"{check.detail}; run `python -m nighthawk fetch-tools`")
+    checks, client = doctor(load_versions(), platform, options.vault_auth, options.environ, options.vault_transport)
+    vault_problems = [check.detail for check in checks if not check.ok]
+    if vault_problems:
+        problems.append(f"{'; '.join(vault_problems)}; {VAULT_HELP}")
     run_as = (os.getuid(), os.getgid())
     if not problems:
         components = runner(
@@ -127,65 +173,61 @@ def preflight(
         if "Podman" in (components.stdout or "") and "rootless" in (security.stdout or ""):
             # Rootless Podman maps container root to the invoking user, who owns the secret files.
             run_as = (0, 0)
+            if options.host_collection:
+                problems.append(
+                    "--host-collection needs Docker Engine: it reads the Docker socket and the host's "
+                    "filesystems as root, which rootless Podman does not provide"
+                )
         if not _stack_is_running(options, runner):
-            published = [entry.port for entry in platform.gateway.entry_points if entry.scope == "loopback"]
-            for port in published:
-                if not port_is_free(options.bind_address, port):
-                    problems.append(f"port {options.bind_address}:{port} is already in use")
-    if problems:
+            port = local_entry_point(platform).port
+            if not port_is_free(options.bind_address, port):
+                problems.append(f"port {options.bind_address}:{port} is already in use")
+    if problems or client is None:
         raise ConfigurationError("prerequisites not met:\n  - " + "\n  - ".join(problems))
-    return run_as
+    return run_as, client
 
 
-def _exists(options: Options, platform: Platform, reference: str) -> bool:
-    item = platform.secrets[reference]
-    return trust.secret_key_exists(options.root / item.file, item.key)
+def _project_volumes(options: Options, runner: Runner) -> list[str]:
+    result = runner([options.container, "volume", "ls", "--format", "{{.Name}}"], capture_output=True, text=True)
+    if result.returncode != 0:
+        return []
+    return sorted(name for name in (result.stdout or "").split() if name.startswith(f"{options.project}_"))
 
 
-def _recipient(options: Options, runner: Runner) -> str:
-    if not options.age_key.exists():
-        options.age_key.parent.mkdir(parents=True, exist_ok=True)
-        recipient = generate_recipient(options.age_key, runner=runner)
-        options.created.append("age key")
-        return recipient
-    match = re.search(r"public key: (age1[0-9a-z]+)", options.age_key.read_text(encoding="utf-8"))
-    if match is None:
-        raise ConfigurationError(f"{options.age_key}: no public key comment found")
-    return match.group(1)
+def ensure_secrets(
+    options: Options, platform: Platform, client: Client, runner: Runner, out: Callable[[str], None],
+) -> None:
+    """Create each referenced secret that does not exist yet in Vault. Existing values are never touched."""
+    def exists(reference: str) -> bool:
+        return secret_exists(client, platform.secrets[reference])
 
-
-def ensure_secrets(options: Options, platform: Platform, runner: Runner, out: Callable[[str], None]) -> None:
-    """Create each referenced secret that does not exist yet. Existing values are never touched."""
-    recipients = [_recipient(options, runner)]
-    common = {"root": options.root, "runner": runner}
+    identities = [reference for reference in trust.storage_identity_refs(platform) if not exists(reference)]
+    volumes = _project_volumes(options, runner) if identities else []
+    if volumes:
+        # New identities could not read what the lost ones wrote, so nothing is generated.
+        raise ConfigurationError(
+            f"Vault holds no value for the storage identities ({', '.join(identities)}) that protect the data in "
+            f"existing volumes ({', '.join(volumes)}). A development Vault loses everything when it restarts. "
+            "Clear the volumes with `python -m nighthawk teardown-docker --purge --yes`, then run the quickstart again."
+        )
     for credential in platform.credentials:
-        if not _exists(options, platform, credential.secret_ref):
-            trust.generate_credential(platform, credential.id, recipients, **common)
+        if not exists(credential.secret_ref):
+            trust.generate_credential(platform, credential.id, client)
             options.created.append(f"credential {credential.id}")
-    for reference in trust.storage_identity_refs(platform):
-        if not _exists(options, platform, reference):
-            trust.generate_storage_identity(platform, reference, recipients, **common)
-            options.created.append(f"storage identity {reference}")
+    for reference in identities:
+        trust.generate_storage_identity(platform, reference, client)
+        options.created.append(f"storage identity {reference}")
     admin = platform.grafana.admin_secret_ref
-    if not _exists(options, platform, admin):
+    if not exists(admin):
         password = token_source.token_urlsafe(24)
-        trust.store_new_secret(platform.secrets[admin], password, recipients, profile=platform.profile, **common)
+        store_secret(client, platform, admin, password)
         options.created.append("Grafana admin password")
         out(f"Grafana admin password (shown once): {password}")
-    ca = platform.gateway.client_ca_secret_ref
-    if not _exists(options, platform, ca):
-        trust.init_ca(platform, recipients, options.ca_valid_days, **common)
-        options.created.append("certificate authority")
-    # The local CA also signs the storage certificate, so the storage trust references hold its certificate.
-    storage_cas = {binding.tls.ca_secret_ref for binding in platform.bindings.values() if binding.tls.ca_secret_ref}
-    for reference in sorted(storage_cas):
-        if not _exists(options, platform, reference):
-            certificate = trust._decrypt(platform.secrets[ca], options.root, runner)
-            trust.store_new_secret(platform.secrets[reference], certificate, recipients, profile=platform.profile, **common)
-            options.created.append(f"storage trust {reference}")
-    missing = sorted(reference for reference in platform.secrets if not _exists(options, platform, reference))
+    missing = sorted(reference for reference in platform.secrets if not exists(reference))
     if missing:
-        raise ConfigurationError(f"the quickstart cannot create these secrets: {', '.join(missing)}")
+        raise ConfigurationError(
+            f"the quickstart cannot create these secrets; store them with store-secret: {', '.join(missing)}"
+        )
 
 
 def _write(path: Path, content: str | bytes, mode: int) -> bool:
@@ -218,26 +260,65 @@ def _sync(files: dict[str, str | bytes], target: Path, mode: int) -> bool:
     return changed
 
 
-def _needs_issue(certificate_path: Path) -> bool:
+def _needs_issue(certificate_path: Path, authority: x509.Certificate) -> bool:
+    """Missing, unreadable, close to expiry, or signed by an authority Vault no longer has."""
     if not certificate_path.exists():
         return True
     try:
         certificate = x509.load_pem_x509_certificate(certificate_path.read_bytes())
-    except ValueError:
+        certificate.verify_directly_issued_by(authority)
+    except (ValueError, TypeError, InvalidSignature):
         return True
     return certificate.not_valid_after_utc - datetime.datetime.now(datetime.timezone.utc) < RENEW_BEFORE
 
 
-def _ensure_certificate(options: Options, platform: Platform, runner: Runner, directory: Path, stem: str, **what) -> None:
+def _ensure_certificate(
+    options: Options, platform: Platform, client: Client, authority: x509.Certificate, directory: Path,
+    stem: str, **what,
+) -> None:
     certificate_path, key_path = directory / f"{stem}.crt.pem", directory / f"{stem}.key.pem"
-    if not _needs_issue(certificate_path) and key_path.exists():
+    if not _needs_issue(certificate_path, authority) and key_path.exists():
         return
     for path in (certificate_path, key_path):
         path.unlink(missing_ok=True)
-    trust.issue_certificate(
-        platform, directory, options.certificate_valid_days, root=options.root, runner=runner, **what,
-    )
+    trust.issue_certificate(platform, directory, options.certificate_valid_days, client, **what)
     options.created.append(f"certificate {stem}")
+
+
+def select_credentials(options: Options, platform: Platform) -> tuple[str | None, tuple[str, ...]]:
+    """Split the named credentials into the collector's ingestion credential and Grafana's query credentials.
+
+    Raises when a name is not declared, when an ingestion credential belongs to another
+    datastream than the collector's, or when an overlap is left without a choice.
+    """
+    stream = _select_stream(options, platform)
+    declared = {item.id: item for item in platform.credentials}
+    ingest: list[str] = []
+    query: list[str] = []
+    for credential_id in options.credentials:
+        credential = declared.get(credential_id)
+        if credential is None:
+            raise ConfigurationError(f"--credential {credential_id}: the platform document declares no such credential")
+        if credential.permission == "ingest":
+            if (credential.tenant, credential.datastream) != (stream.tenant, stream.datastream):
+                raise ConfigurationError(
+                    f"--credential {credential_id}: not an ingestion credential of the collector's datastream "
+                    f"{stream.tenant}/{stream.datastream}"
+                )
+            ingest.append(credential_id)
+        else:
+            query.append(credential_id)
+    if len(set(ingest)) > 1:
+        raise ConfigurationError(f"--credential: both {' and '.join(sorted(set(ingest)))} were named for the collector; choose one")
+    chosen = ingest[0] if ingest else None
+    # Both raise, listing the candidates, when an overlap has no choice.
+    collector._select_credential(platform, stream, collector.PROFILES["docker"], chosen)
+    grafana.query_credentials(platform, query)
+    return chosen, tuple(query)
+
+
+def _digests(paths: list[Path]) -> dict[Path, str | None]:
+    return {path: hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None for path in paths}
 
 
 def _select_stream(options: Options, platform: Platform):
@@ -249,34 +330,58 @@ def _select_stream(options: Options, platform: Platform):
     raise ConfigurationError(f"unknown tenant/datastream {options.tenant}/{options.datastream}")
 
 
-def render(options: Options, platform: Platform, run_as: tuple[int, int], runner: Runner) -> dict[str, bool]:
+def render(
+    options: Options, platform: Platform, run_as: tuple[int, int], client: Client,
+    out: Callable[[str], None] = print,
+) -> dict[str, bool]:
     """Materialize secrets and write every rendered and runtime file; report which parts changed."""
     # Imported here: __main__ imports this module.
     from nighthawk.__main__ import main
 
-    materialize(options.config, root=options.root, output_dir=options.secrets_dir, runner=runner)
+    ingest_choice, query_choice = select_credentials(options, platform)
+    query_files = [
+        materialized_path(options.secrets_dir, platform.secrets[credential.secret_ref])
+        for credential in grafana.query_credentials(platform, query_choice).values()
+    ]
+    before = _digests(query_files)
+    materialize(platform, client, options.secrets_dir)
+    after = _digests(query_files)
+    # A value that existed and now differs was rotated in place; Grafana cannot detect that itself.
+    rotated = any(before[path] is not None and before[path] != after[path] for path in query_files)
     runtime = options.secrets_dir / "runtime"
 
     def read(reference: str) -> str:
-        item = platform.secrets[reference]
-        return (options.secrets_dir / item.file / item.key).read_text(encoding="utf-8").rstrip("\r\n")
+        return materialized_path(options.secrets_dir, platform.secrets[reference]).read_text(encoding="utf-8").rstrip("\r\n")
 
     for name in ("gateway", "storage", "collector-certificates"):
         (runtime / name).mkdir(parents=True, exist_ok=True, mode=0o700)
-    _ensure_certificate(options, platform, runner, runtime / "gateway", "gateway-server", server=True)
+    # The authority is the one in Vault's PKI mount; only its public certificate is ever read.
+    ca_certificate = trust.authority_certificate(client)
+    authority = x509.load_pem_x509_certificate(ca_certificate.encode("ascii"))
+    previous = runtime / "gateway" / "client-ca.pem"
+    if previous.exists() and previous.read_text(encoding="utf-8") != ca_certificate:
+        out(
+            "The certificate authority in Vault changed. Certificates the quickstart manages are issued again; "
+            "any certificate issued separately, such as a remote collector's, must be issued again too."
+        )
+    _ensure_certificate(options, platform, client, authority, runtime / "gateway", "gateway-server", server=True)
     if platform.storage_provider == "seaweedfs":
-        _ensure_certificate(options, platform, runner, runtime / "storage", "storage-server", storage=True)
+        _ensure_certificate(options, platform, client, authority, runtime / "storage", "storage-server", storage=True)
     stream = _select_stream(options, platform)
-    credential = collector._select_credential(platform, stream, collector.PROFILES["docker"], None)
+    credential = collector._select_credential(platform, stream, collector.PROFILES["docker"], ingest_choice)
     if credential.certificate_identity is not None:
         _ensure_certificate(
-            options, platform, runner, runtime / "collector-certificates", credential.id, credential_id=credential.id,
+            options, platform, client, authority, runtime / "collector-certificates", credential.id,
+            credential_id=credential.id,
         )
 
     with tempfile.TemporaryDirectory() as temporary:
         contracts = Path(temporary) / "contracts"
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
-            status = main(["render-contracts", "--config", str(options.config), "--output", str(contracts)])
+            status = main([
+                "render-contracts", "--config", str(options.config), "--output", str(contracts),
+                *(argument for credential_id in query_choice for argument in ("--credential", credential_id)),
+            ])
         if status != 0:
             raise ConfigurationError(errors.getvalue().strip() or "render-contracts failed")
         rendered = {
@@ -298,7 +403,6 @@ def render(options: Options, platform: Platform, run_as: tuple[int, int], runner
         ),
     }
 
-    ca_certificate = read(platform.gateway.client_ca_secret_ref) + "\n"
     changed["gateway"] = any([
         _write(runtime / "gateway" / "client-ca.pem", ca_certificate, 0o600),
         _write(runtime / "gateway" / "traefik-static.yaml", rendered["gateway/traefik-static.yaml"], 0o600),
@@ -308,6 +412,8 @@ def render(options: Options, platform: Platform, run_as: tuple[int, int], runner
     if platform.storage_provider == "seaweedfs":
         storage_cas = sorted({b.tls.ca_secret_ref for b in platform.bindings.values() if b.tls.ca_secret_ref})
         storage_trust = "".join(read(reference) + "\n" for reference in storage_cas)
+        if any(binding.tls.trust == "pki" for binding in platform.bindings.values()):
+            storage_trust = ca_certificate + storage_trust
         changed["storage"] = any([
             _write(runtime / "storage" / "s3.json", json.dumps(storage.s3_identities(platform, read), indent=2, sort_keys=True) + "\n", 0o600),
             _write(runtime / "storage" / "buckets.txt", "".join(f"{bucket}\n" for bucket in storage.buckets(platform)), 0o600),
@@ -333,6 +439,13 @@ def render(options: Options, platform: Platform, run_as: tuple[int, int], runner
         collector_files["client.key.pem"] = (issued / f"{credential.id}.key.pem").read_bytes()
     changed["collector"] |= _sync(collector_files, runtime / "collector", 0o600)
 
+    # The host collector gets the full docker profile; without the option nothing is left for it to mount.
+    host_files = collector.render_collector(
+        platform, stream.tenant, stream.datastream, "docker", entry_point=options.collector_entry_point,
+        credential_id=credential.id,
+    ) if options.host_collection else {}
+    changed["collector-host"] = _sync(host_files, options.rendered_dir / "collector-host", 0o644)
+    changed["query-secrets"] = rotated
     _write(options.rendered_dir / "compose.env", "".join(f"{key}={value}\n" for key, value in {
         "COMPOSE_PROJECT_NAME": options.project,
         "NIGHTHAWK_RENDERED_DIR": options.rendered_dir.resolve(),
@@ -340,6 +453,7 @@ def render(options: Options, platform: Platform, run_as: tuple[int, int], runner
         "NIGHTHAWK_UID": run_as[0],
         "NIGHTHAWK_GID": run_as[1],
         "NIGHTHAWK_BIND_ADDRESS": options.bind_address,
+        "NIGHTHAWK_GATEWAY_PORT": local_entry_point(platform).port,
         "NIGHTHAWK_GATEWAY_HOSTNAME": platform.gateway.hostname,
         "NIGHTHAWK_GRAFANA_HOSTNAME": platform.grafana.hostname,
     }.items()), 0o644)
@@ -370,16 +484,23 @@ def quickstart(
     platform = load_platform(options.config)
     if platform.deployment != "docker":
         raise ConfigurationError(f"the quickstart needs a docker platform document, not {platform.deployment}")
-    run_as = preflight(options, platform, run, port_is_free)
+    # Fails before anything is checked, created, or started when a credential choice is missing or wrong.
+    _, query_choice = select_credentials(options, platform)
+    run_as, client = preflight(options, platform, run, port_is_free)
     was_running = _stack_is_running(options, run)
-    ensure_secrets(options, platform, run, out)
-    changed = render(options, platform, run_as, run)
+    ensure_secrets(options, platform, client, run, out)
+    changed = render(options, platform, run_as, client, out)
 
     compose = _compose(options)
     if options.build:
         _run(run, [*compose, "build", "authz"], "building the NightHawk image")
+    up = [*compose]
+    services = list(WAITED_SERVICES)
+    if options.host_collection:
+        up += ["--profile", HOST_COLLECTION_PROFILE]
+        services.append(HOST_COLLECTION_SERVICE)
     try:
-        _run(run, [*compose, "up", "--detach", "--wait", "--wait-timeout", str(options.timeout), *WAITED_SERVICES],
+        _run(run, [*up, "up", "--detach", "--wait", "--wait-timeout", str(options.timeout), *services],
              "starting the stack", timeout=options.timeout + 60)
         _run(run, [*compose, "run", "--rm", "wait-alloy"], "waiting for the collector", timeout=options.timeout)
     except ConfigurationError as error:
@@ -387,14 +508,21 @@ def quickstart(
         raise ConfigurationError(f"{error}" + (f"; not healthy: {', '.join(failing)}" if failing else "")) from None
     if was_running:
         # Running services keep their mounts; tell the ones that do not watch their files to reload.
-        for part, service in (("authz", "authz"), ("collector", "alloy")):
+        reloads = [("authz", "authz"), ("collector", "alloy")]
+        if options.host_collection:
+            reloads.append(("collector-host", HOST_COLLECTION_SERVICE))
+        for part, service in reloads:
             if changed.get(part):
                 _run(run, [*compose, "kill", "--signal", "HUP", service], f"reloading {service}")
-    _run(run, [*compose, "run", "--rm", "grafana-init"], "provisioning Grafana", timeout=options.timeout)
+    provision = [*compose, "run", "--rm", "grafana-init"]
+    for credential_id in query_choice:
+        provision += ["--credential", credential_id]
+    if changed.get("query-secrets"):
+        provision.append("--update-secrets")
+    _run(run, provision, "provisioning Grafana", timeout=options.timeout)
 
     stream = _select_stream(options, platform)
-    local = [entry for entry in platform.gateway.entry_points if entry.scope == "loopback"]
-    port = local[0].port if local else platform.gateway.entry_points[0].port
+    port = local_entry_point(platform).port
     out("NightHawk is running.")
     out(f"  Gateway:  https://{platform.gateway.hostname}:{port}  (published on {options.bind_address}:{port})")
     out(f"  Grafana:  https://{platform.grafana.hostname}:{port}  (user admin)")
@@ -413,7 +541,10 @@ def teardown(
     run = partial(runner, env=_environment(options))
     if not (options.rendered_dir / "compose.env").exists():
         raise ConfigurationError(f"{options.rendered_dir / 'compose.env'} not found; nothing to tear down")
-    command = [*_compose(options), "--profile", "sample", "--profile", "tools", "down", "--remove-orphans"]
+    command = [
+        *_compose(options), "--profile", "sample", "--profile", "tools", "--profile", HOST_COLLECTION_PROFILE,
+        "down", "--remove-orphans",
+    ]
     if purge:
         command.append("--volumes")
     _run(run, command, "tearing down the stack", timeout=options.timeout)

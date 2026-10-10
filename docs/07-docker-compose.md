@@ -23,7 +23,7 @@ it. It mounts two directories named in the env file:
 | Directory | Content | Written by |
 | --- | --- | --- |
 | `NIGHTHAWK_RENDERED_DIR` (default `.generated/docker`) | Non-secret: `contracts/` (output of `render-contracts`, including `backends/`), `overrides/`, `collector/`, `platform/`, `compose.env` | `quickstart-docker` |
-| `NIGHTHAWK_SECRETS_DIR` (default `.materialized-secrets`) | Secret, owner-only: `secrets/` (materialized) and `runtime/` (per-service directories) | `quickstart-docker` |
+| `NIGHTHAWK_SECRETS_DIR` (default `.materialized-secrets`) | Secret, owner-only: `kv/` (secrets read from Vault) and `runtime/` (per-service directories) | `quickstart-docker` |
 
 Directories are mounted, never single files, and the quickstart replaces
 files one at a time. That is what lets a re-render reach running containers:
@@ -44,6 +44,20 @@ adding a tenant is a re-render and a reload, not a Compose edit.
 A backend can read neither another backend's keys, nor the storage server
 key, nor the identity file.
 
+### Vault
+
+Vault is not part of the Compose stack and no container talks to it. The
+quickstart, on the host, reads secrets from the Vault the platform document
+declares and has certificates signed there, then writes the files above. The
+"client CA", "gateway CA", and "storage CA" in the table are all the public
+certificate of the authority in Vault's PKI mount; its private key never
+leaves Vault. The Vault credential is not written to `compose.env`, to either
+directory, or into any container's environment.
+
+Because containers hold only files, the running stack keeps working when
+Vault is unavailable. A re-render, a new secret, or a new certificate needs
+it again.
+
 ## Networks and exposure
 
 | Network | Internal | Members |
@@ -53,8 +67,13 @@ key, nor the identity file.
 | `storage` | yes | The four backends, SeaweedFS, `storage-init` |
 | `authz` | yes | Traefik, the auth service, Alloy |
 
-- The only published port is Traefik's `8443`, bound to
-  `NIGHTHAWK_BIND_ADDRESS`, which defaults to `127.0.0.1`.
+- The only published port is Traefik's loopback-scoped entry point:
+  `NIGHTHAWK_GATEWAY_PORT` (the `local-gateway` rule's port, 8443) bound to
+  `NIGHTHAWK_BIND_ADDRESS`, which defaults to `127.0.0.1`. The quickstart
+  writes both from the platform document and refuses a bind address that is
+  not loopback, because that entry point admits ingestion without a client
+  certificate. The Compose file itself does not check the address: if you
+  write the environment file by hand, keep it on loopback.
 - Traefik is the only route from `edge` to a backend. Grafana is on `edge`
   only, so its data sources can reach telemetry only through the gateway.
 - Traefik has network aliases for the gateway and Grafana host names, so
@@ -119,7 +138,7 @@ Exceptions:
 | --- | --- | --- |
 | `volume-init` | Runs as root, with no network | Named volumes are created root-owned; it only runs `chown` on them |
 | `traefik` | `net.ipv4.ip_unprivileged_port_start=0` in its own network namespace | Lets the non-root proxy listen on 443 for in-network clients |
-| `alloy-host` (profile `host-collection` only) | Root, privileged, runtime socket, host mounts | cAdvisor and Docker log collection need them. Docker Engine only; not started by default and not exercised |
+| `alloy-host` (profile `host-collection` only) | Root, privileged, runtime socket, host mounts | cAdvisor, the node exporter, and Docker log collection need them. Docker Engine only; started only by `quickstart-docker --host-collection`; never run |
 | all, under rootless Podman | `NIGHTHAWK_UID=0` | See [Podman differences](#podman-differences) |
 
 ## Backend configuration
@@ -173,9 +192,10 @@ Behaviour below was observed with the pinned image.
   create a bucket through S3.
 - **Buckets** are created by `storage-init` with `weed shell`
   `s3.bucket.create`, which is repeatable.
-- The storage server certificate is issued for the binding endpoint host
-  name (`issue-certificate --storage`) by the same local CA as the gateway
-  certificate.
+- The storage server certificate is requested for the binding endpoint host
+  name (`issue-certificate --storage`) from the same authority in Vault's PKI
+  mount as the gateway certificate. Backends trust that authority's public
+  certificate, which is why a local binding declares `tls.trust: pki`.
 
 ## External S3
 
@@ -197,7 +217,7 @@ is no Docker document that selects it yet.
 | --- | --- | --- |
 | `tools` | `grafana-init`, `fixtures` | One-shots for `compose run --rm` |
 | `sample` | `sample` | The SDK-instrumented [sample workload](00-quickstart.md#sample-workload) |
-| `host-collection` | `alloy-host` | Host and container collection with the full `docker` collector profile. Docker Engine only; needs a second rendered collector in `collector-host/`. Not exercised |
+| `host-collection` | `alloy-host` | Host and container collection with the full `docker` collector profile. `quickstart-docker --host-collection` renders that collector into `collector-host/` and starts the service; without the option the directory is emptied and the service is not started. The node exporter reads the host through the service's `/rootfs` and `/sys` mounts. Docker Engine only: the quickstart refuses the option under rootless Podman. Rendering is unit-tested and accepted by `alloy validate`; the service has never been run |
 
 ## Podman differences
 
@@ -215,37 +235,53 @@ trying Docker Engine.
   because several services share the rendered directory.
 - **The Podman API socket** must be running and `DOCKER_HOST` must point at
   it. See the quickstart.
-- **`host-collection`** expects the Docker socket and `/var/lib/docker` and
-  was not tried.
+- **`host-collection`** expects the Docker socket and `/var/lib/docker`, so
+  the quickstart refuses `--host-collection` under rootless Podman.
 
 Nothing in the Compose file is Podman-only syntax, but it has not been
 started under Docker Engine.
 
 ## Observed results
 
-Run on 2026-10-09 on Fedora 43, rootless Podman 5.8.4, Docker Compose 5.3.1,
+Run on 2026-10-10 on Fedora 43, rootless Podman 5.8.4, Docker Compose 5.3.1,
 4 CPUs, 16 GB RAM, with `NIGHTHAWK_E2E=1 python -m unittest tests.e2e.test_stack`
 against a stack started from `tests/e2e/platform.yaml` (two customers, two
-datastreams each).
+datastreams each), with secrets and certificates from HashiCorp Vault 2.1.2
+in dev mode.
 
-All 13 cases passed. The suite starts its own stack, runs these, and purges
-it afterwards.
+All 18 cases passed. The suite starts its own dev-mode Vault from the pinned
+image (container `nighthawk-e2e-vault`, loopback port 8210 or
+`NIGHTHAWK_E2E_VAULT_PORT`) and bootstraps it, starts its own stack, runs
+these, and purges both afterwards. It takes about ten minutes.
+
+The suite was run several times that day while it was being extended. One
+run had a failure that did not recur: Grafana answered a data source proxy
+query with 404 `Unable to find datasource plugin`, while the same query
+passed in the runs before and after and later queries in that same run
+succeeded. The cause was not determined; the test now includes Grafana's log
+in its failure message.
 
 | Area | Observed |
 | --- | --- |
 | Four signals | Fixtures sent to the collector over OTLP and the Pyroscope ingest API came back through the gateway from Mimir, Loki, Tempo, and Pyroscope. The collector reached the gateway over TLS with basic authentication |
-| Redaction | Marker values placed under every drop field as metric labels, resource, span, span-event, and log attributes, log body `key=value` and JSON pairs, and profile labels were absent from every query result. The marker in free text without a key was still there, as documented |
-| Tenant isolation | Of four query credentials, only the owner of a log line could read it. A write credential could not query and a query credential could not write. A different tenant, a `a\|b` tenant list, and a wrong tenant on a write were refused with 403; nothing landed in the other tenant |
+| Redaction | Marker values placed under every drop field as metric labels, resource, span, span-event, and log attributes, log body `key=value` and JSON pairs, and profile labels were absent from every query result, including `target_info`, where resource attributes become labels. The fixture series itself was returned, so the absence is not an empty result. One drop field, `user.email`, has a separator and arrives in the profile pipeline as the label `user_email`; it was removed too. The marker in free text without a key was still there, as documented |
+| Tenant isolation | All four datastreams wrote every signal they enable (14 in total) straight through the gateway. Each owner read its own data back; the other three query credentials got nothing for any of them, 42 cross-reads in all, and 403 where the reader does not enable the signal. A write credential could not query and a query credential could not write. A different tenant, a `a\|b` tenant list, and a wrong tenant on a write were refused with 403; nothing landed in the other tenant |
 | Authentication | No credential, an unknown credential, and a wrong secret all returned 401 |
 | Routes | A disabled signal returned 403. Deletion, rule-management, readiness, configuration, and override endpoints returned 404 |
-| Client certificates | A certificate-bound credential was accepted with its certificate and refused without it. A forged `X-Forwarded-Tls-Client-Cert` header, in three spellings including the underscore alias, was refused |
-| Revocation | After adding a fingerprint and re-running the quickstart, that certificate was refused and a second certificate for the same identity still worked, with no restart |
+| Vault | Every credential, storage identity, and the Grafana password was generated into Vault's key-value mount and read back by the quickstart. The gateway and storage server certificates and the collector client certificate were signed by Vault's PKI authority from locally generated keys, and TLS between collector, gateway, Grafana, backends, and storage worked with that authority's certificate as the only trust |
+| Recreated Vault | With the stack's volumes present, the dev-mode Vault was replaced by a new, bootstrapped one. The quickstart stopped before generating anything, named the four storage identities and the seven volumes, and wrote nothing to Vault. After `teardown-docker --purge --yes` it generated everything again and issued certificates from the new authority |
+| Credential handling | The Vault token appeared in no file the quickstart wrote and in no container's environment |
+| Client certificates | A certificate-bound credential was accepted with its Vault-signed certificate and refused without it. A forged `X-Forwarded-Tls-Client-Cert` header, in three spellings including the underscore alias, was refused |
+| Revocation | After revoking a certificate in Vault with `revoke-certificate`, listing the fingerprint it printed, and re-running the quickstart, that certificate was refused and a second certificate for the same identity still worked, with no restart |
 | gRPC | An OTLP gRPC trace export through the gateway returned `grpc-status: 0` and the trace was queryable. A query credential got 403 and no credential got 401 on the same path |
-| Backends | Mimir, Loki, and Tempo, addressed directly on the private network without a tenant, returned 401. Mimir and Pyroscope reported the four and three rendered tenants at `/runtime_config`, and Tempo reported the rendered retention and burst |
+| Backends | Mimir, Loki, Tempo, and Pyroscope, addressed directly on the private network without a tenant, returned 401; Pyroscope answered the same request with a tenant. Mimir, Tempo, and Pyroscope reported the rendered retention of every datastream for their signal (ten values), including one datastream whose four signals declare four different retentions |
 | Override reload | A changed metrics ingestion rate appeared in Mimir within a minute; no container was recreated |
 | Exposure | The only published port was Traefik's 8443 on 127.0.0.1 |
+| Correlations | Every `datasourceUid` in the 18 provisioned correlation links was a data source of the same Grafana organization, and a datastream's trace link pointed at its own trace data source |
+| Credential rotation | An ingestion and a query credential were each rotated by the runbook with no failed request at any step, and a query secret was rotated in place; see [gateway](05-gateway.md#observed-at-runtime) |
+| Provisioning | Run again straight after the first start, Grafana provisioning printed `no changes`; and again after rotations and re-renders |
 | Grafana | Both organizations existed. An organization's log data source returned the fixtures through Grafana, the gateway, and Loki; the other organization did not have that data source. The UI host name with a telemetry path did not reach a backend. A second `grafana-init` printed `no changes` |
-| Persistence | Fixtures were still returned after restarting Loki alone, and all four signals after stopping and starting the whole stack |
+| Persistence | Fixtures were still returned after restarting Loki, Mimir, Tempo, and Pyroscope one at a time, and all four signals after stopping and starting the whole stack. Mimir answered `empty ring` for a short while after its own restart before serving again |
 
 Loki's loaded overrides were not observed directly: Loki 3.7.8 has no
 endpoint that lists them. Its configuration loads the file, and tenant
@@ -259,17 +295,36 @@ provisioning update everything on every run; the gateway had no route for
 the Pyroscope ingest API that `pyroscope.write` forwards to; and JSON pairs
 in OTLP log bodies were not redacted.
 
+Found the same way on 2026-10-10 and fixed: Grafana makes the first data
+source created in an organization its default regardless of what is sent, so
+provisioning straight after the first start "updated" one data source per
+organization instead of reporting no changes. Provisioning now reads a newly
+created data source back and corrects it at once; the suite's first case
+checks this. A profile label for a drop field with a separator
+(`user.email`, arriving as `user_email`) was not removed; the label rules
+now match the sanitized name.
+
 ## Not verified
 
 - **Retention deletion.** Each backend loads its retention override and runs
   its compactor, but no data has been aged out. A rendered or loaded value
   is not evidence of deletion.
+- **Loki's loaded retention.** Loki has no endpoint that reports it.
+- **Delivery while a backend or the gateway is down.** The collector's
+  queues and retries are configured and unit-tested as text; nothing has
+  been stopped while telemetry was being sent.
+- **The scrape and log-file redaction pipelines.** The stack's collector
+  receives pushed telemetry only.
 - **Docker Engine.**
 - **A `restricted-external` entry point** reached from another machine.
 - **Load.** The memory limits are generous guesses (see the quickstart for
   measured idle usage), and the auth service has not been load-tested.
 - **The `host-collection` profile and the external S3 override.**
 - **Backup and restore**, and upgrades between pinned versions.
+- **A production Vault.** Only a dev-mode Vault in a local container has been
+  used: no namespace, no high availability, no sealed or failing Vault during
+  a render, no operator-managed PKI hierarchy, and no AppRole login from the
+  quickstart (AppRole login itself is covered by an integration test).
 
 ## Troubleshooting
 

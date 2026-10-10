@@ -1,226 +1,222 @@
-"""SOPS + age secret lifecycle: prerequisite checks first, then generation/encryption/rotation."""
+"""Secret lifecycle on Vault's key-value store: prerequisite check, store, rotate, materialize.
+
+Values are read from Vault only by these functions and are never placed in process arguments.
+Writes use check-and-set, so a key is never replaced by accident and a concurrent change is refused.
+"""
 
 from __future__ import annotations
 
-import json
-import re
 import shutil
 import stat
-import subprocess
-import tempfile
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Callable
+from typing import Mapping
 
-import yaml
+from nighthawk.config import ROOT, ConfigurationError, Platform, SecretReference, mapping, string, vault_supports
+from nighthawk.vault import Auth, Client, Transport, VaultError, connect, pki_roles
 
-from nighthawk.config import ROOT, ConfigurationError, Platform, load_platform, mapping, sequence, string
-
-Runner = Callable[..., subprocess.CompletedProcess]
-
-LOCAL_RECIPIENTS_REGISTRY = ROOT / ".generated" / "age-recipients.local.json"
 MATERIALIZED_SECRETS_DIR = ROOT / ".materialized-secrets"
-SECRETS_DIR = ROOT / "secrets"
+
+
+def materialized_path(output_dir: Path, reference: SecretReference) -> Path:
+    """Where `materialize` writes one referenced secret."""
+    return output_dir / "kv" / reference.path / reference.key
 
 
 @dataclass(frozen=True)
-class ToolCheck:
-    tool: str
-    expected_version: str
-    found_version: str | None
+class Check:
+    name: str
     ok: bool
     detail: str
 
 
-def _check_tool(tool: str, expected_version: str, runner: Runner) -> ToolCheck:
+def doctor(
+    matrix: dict, platform: Platform, auth: Auth = Auth(), environ: Mapping[str, str] | None = None,
+    transport: Transport | None = None,
+) -> tuple[list[Check], Client | None]:
+    """Check the declared Vault; return the checks and, when the credential is accepted, a client."""
+    vault = platform.vault
+    checks: list[Check] = []
     try:
-        result = runner([tool, "--version"], capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.TimeoutExpired) as error:
-        return ToolCheck(tool, expected_version, None, False, f"{tool} is not available: {error}")
-    if result.returncode != 0:
-        return ToolCheck(
-            tool, expected_version, None, False,
-            f"{tool} --version exited with code {result.returncode}",
+        health = Client(vault, None, transport).health()
+    except VaultError as error:
+        return [Check("vault", False, str(error))], None
+    if not health.get("initialized") or health.get("sealed"):
+        state = "sealed" if health.get("initialized") else "not initialized"
+        return [Check("vault", False, f"Vault at {vault.address} is {state}")], None
+    version = str(health.get("version", ""))
+    checks.append(Check("vault", True, f"Vault {version} at {vault.address} is reachable and unsealed"))
+    supported = mapping(mapping(mapping(matrix["secrets_store"])["vault"])["supported"])
+    span = f"{string(supported['minimum'])} up to, not including, {string(supported['below'])}"
+    try:
+        in_range = vault_supports(matrix, version)
+    except ConfigurationError:
+        in_range = False
+    checks.append(Check(
+        "version", in_range,
+        f"Vault {version} is supported" if in_range else f"Vault {version or 'of unknown version'} is outside the supported range {span}",
+    ))
+    try:
+        client = connect(platform, auth, environ, transport)
+        client.lookup_self()
+    except VaultError as error:
+        checks.append(Check("credential", False, str(error)))
+        return checks, None
+    checks.append(Check("credential", True, "the Vault credential is accepted"))
+    kv = client.mount_type(vault.kv_mount)
+    if kv is None:
+        checks.append(Check("kv_mount", False, f"key-value mount {vault.kv_mount} does not exist or is not readable"))
+    elif kv[0] != "kv" or str(kv[1].get("version")) != "2":
+        checks.append(Check("kv_mount", False, f"{vault.kv_mount} is not a key-value version 2 mount"))
+    else:
+        checks.append(Check("kv_mount", True, f"key-value mount {vault.kv_mount} is version 2"))
+    pki = client.mount_type(vault.pki_mount)
+    if pki is None:
+        checks.append(Check("pki_mount", False, f"PKI mount {vault.pki_mount} does not exist or is not readable"))
+    elif pki[0] != "pki":
+        checks.append(Check("pki_mount", False, f"{vault.pki_mount} is not a PKI mount"))
+    elif not client.pki_ca_pem():
+        checks.append(Check("pki_mount", False, f"PKI mount {vault.pki_mount} has no certificate authority"))
+    else:
+        checks.append(Check("pki_mount", True, f"PKI mount {vault.pki_mount} has a certificate authority"))
+    wanted = pki_roles(platform)
+    for role in (vault.server_role, vault.client_role):
+        definition = client.pki_role(role) if pki is not None else None
+        if definition is None:
+            checks.append(Check(f"role {role}", False, f"PKI role {role} does not exist or is not readable"))
+            continue
+        refused = _not_allowed(definition, wanted[role])
+        checks.append(Check(
+            f"role {role}", not refused,
+            f"PKI role {role} is present" if not refused else
+            f"PKI role {role} does not allow {', '.join(refused)}; apply the rendered vault/pki-roles.json",
+        ))
+    return checks, client
+
+
+def _not_allowed(role: dict, wanted: dict) -> list[str]:
+    """Declared hostnames and collector identities that a PKI role in Vault would refuse to sign."""
+    if role.get("allow_any_name"):
+        return []
+    domains, patterns = list(role.get("allowed_domains") or []), list(role.get("allowed_uri_sans") or [])
+
+    def domain_allowed(name: str) -> bool:
+        return any(
+            (role.get("allow_bare_domains") and name == domain)
+            or (role.get("allow_subdomains") and name.endswith(f".{domain}"))
+            or (role.get("allow_glob_domains") and fnmatchcase(name, domain))
+            for domain in domains
         )
-    output = (result.stdout or "") + (result.stderr or "")
-    match = re.search(r"v?([0-9]+\.[0-9]+(?:\.[0-9]+)?)", output)
-    if match is None:
-        return ToolCheck(tool, expected_version, None, False, f"could not parse {tool} version from {output.strip()!r}")
-    found_version = match.group(1)
-    expected = expected_version.lstrip("v")
-    if found_version != expected:
-        return ToolCheck(
-            tool, expected_version, found_version, False,
-            f"{tool} {found_version} does not match the pinned version {expected_version}",
-        )
-    return ToolCheck(tool, expected_version, found_version, True, f"{tool} {found_version} matches the pinned version")
+
+    refused = [name for name in wanted["allowed_domains"] if not domain_allowed(name)]
+    refused += [name for name in wanted["allowed_uri_sans"] if not any(fnmatchcase(name, pattern) for pattern in patterns)]
+    return refused
 
 
-def doctor(matrix: dict, runner: Runner = subprocess.run) -> list[ToolCheck]:
-    """Resolve sops/age prerequisite status against the compatibility matrix's pinned versions."""
-    secrets_tools = mapping(matrix["secrets_tools"])
-    checks: list[ToolCheck] = []
-    for tool in ("sops", "age"):
-        expected_version = string(mapping(secrets_tools[tool])["version"])
-        checks.append(_check_tool(tool, expected_version, runner))
-    return checks
+def ensure_doctor_ok(
+    matrix: dict, platform: Platform, auth: Auth = Auth(), environ: Mapping[str, str] | None = None,
+    transport: Transport | None = None,
+) -> Client:
+    """Return a client only when every prerequisite holds; otherwise raise before anything is read or written."""
+    checks, client = doctor(matrix, platform, auth, environ, transport)
+    failures = [check.detail for check in checks if not check.ok]
+    if failures or client is None:
+        raise ConfigurationError("Vault prerequisite check failed: " + "; ".join(failures))
+    return client
 
 
-def ensure_doctor_ok(matrix: dict, runner: Runner = subprocess.run) -> None:
-    """Raise ConfigurationError before any secrets-workflow command touches a file if prerequisites fail."""
-    failures = [check for check in doctor(matrix, runner) if not check.ok]
-    if failures:
-        details = "; ".join(check.detail for check in failures)
-        raise ConfigurationError(f"secrets-workflow prerequisite check failed: {details}")
+def _reference(platform: Platform, secret_ref: str) -> SecretReference:
+    if secret_ref not in platform.secrets:
+        raise ConfigurationError(f"{secret_ref!r} is not a secret reference of this platform document")
+    return platform.secrets[secret_ref]
 
 
-def _load_registry(path: Path | None = None) -> set[str]:
-    path = path if path is not None else LOCAL_RECIPIENTS_REGISTRY
-    if not path.exists():
-        return set()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, ValueError) as error:
-        raise ConfigurationError(f"{path}: cannot read local recipients registry: {error}") from error
-    return set(sequence(data))
+def _check_value(value: str) -> None:
+    if not isinstance(value, str) or not value:
+        raise ConfigurationError("a secret value must be a non-empty string")
 
 
-def _record_registry(recipient: str, path: Path | None = None) -> None:
-    path = path if path is not None else LOCAL_RECIPIENTS_REGISTRY
-    recipients = _load_registry(path)
-    recipients.add(recipient)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(sorted(recipients), indent=2) + "\n", encoding="utf-8")
+def secret_exists(client: Client, reference: SecretReference) -> bool:
+    return reference.key in client.kv_read(reference.path)[0]
 
 
-def generate_recipient(
-    path: Path, overwrite: bool = False, runner: Runner = subprocess.run, registry_path: Path | None = None,
-) -> str:
-    """Generate a fresh age key pair at `path`; return the public recipient string."""
-    if path.exists() and not overwrite:
-        raise ConfigurationError(f"{path}: refusing to overwrite an existing age key without an explicit overwrite flag")
-    result = runner(["age-keygen", "-o", str(path)], capture_output=True, text=True, timeout=10)
-    if result.returncode != 0:
-        raise ConfigurationError(f"age-keygen failed: {(result.stderr or result.stdout or '').strip()}")
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
-    content = path.read_text(encoding="utf-8") if path.exists() else ""
-    output = (result.stderr or "") + (result.stdout or "") + content
-    match = re.search(r"(age1[0-9a-z]+)", output)
-    if match is None:
-        raise ConfigurationError("age-keygen did not report a public recipient")
-    recipient = match.group(1)
-    _record_registry(recipient, registry_path)
-    return recipient
-
-
-def _extract_sops_recipients(path: Path) -> set[str]:
-    try:
-        document = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, yaml.YAMLError) as error:
-        raise ConfigurationError(f"{path}: cannot read SOPS metadata: {error}") from error
-    sops_metadata = mapping(mapping(document).get("sops", {}))
-    return {string(mapping(entry)["recipient"]) for entry in sequence(sops_metadata.get("age", []))}
-
-
-def guard_production_recipients(
-    profile: str, recipients: set[str], confirmed: bool, registry_path: Path | None = None,
-) -> None:
-    """Reject locally auto-generated age recipients for `profile: production` unless explicitly confirmed."""
-    if profile != "production":
-        return
-    if not recipients:
-        raise ConfigurationError("profile: production requires an explicit list of age recipients")
-    auto_generated = _load_registry(registry_path)
-    if not confirmed and recipients & auto_generated:
+def store_secret(client: Client, platform: Platform, secret_ref: str, value: str) -> SecretReference:
+    """Store `value` at a reference that holds nothing yet. Every other key at the path is kept."""
+    reference = _reference(platform, secret_ref)
+    _check_value(value)
+    data, version = client.kv_read(reference.path)
+    if reference.key in data:
         raise ConfigurationError(
-            "profile: production rejects locally auto-generated age recipients without explicit confirmation"
+            f"{secret_ref}: {reference.path} key {reference.key!r} already holds a value; use rotate-secret to replace it"
         )
+    client.kv_write(reference.path, {**data, reference.key: value}, version)
+    return reference
 
 
-def encrypt_secret(
-    file_name: str, key: str, value: str, recipients: list[str],
-    secrets_dir: Path = SECRETS_DIR, profile: str = "development",
-    confirm_production_recipients: bool = False, runner: Runner = subprocess.run,
-) -> Path:
-    """Encrypt `value` under `key` into a new SOPS file `secrets_dir/file_name`."""
-    if not recipients:
-        raise ConfigurationError("encryption requires at least one age recipient")
-    guard_production_recipients(profile, set(recipients), confirm_production_recipients)
-    secrets_dir.mkdir(parents=True, exist_ok=True)
-    target = secrets_dir / file_name
-    plaintext = yaml.safe_dump({key: value})
-    handle = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False, dir=secrets_dir)
-    try:
-        handle.write(plaintext)
-        handle.close()
-        temp_path = Path(handle.name)
-        result = runner(
-            ["sops", "--encrypt", "--age", ",".join(recipients), "--output", str(target), str(temp_path)],
-            capture_output=True, text=True, timeout=30,
+def rotate_secret(client: Client, platform: Platform, secret_ref: str, value: str) -> SecretReference:
+    """Replace an existing value with a new version. Every other key at the path is kept."""
+    reference = _reference(platform, secret_ref)
+    _check_value(value)
+    data, version = client.kv_read(reference.path)
+    if reference.key not in data:
+        raise ConfigurationError(
+            f"{secret_ref}: {reference.path} key {reference.key!r} holds no value; cannot rotate a secret that does not exist"
         )
-        if result.returncode != 0:
-            raise ConfigurationError(f"sops encryption failed: {(result.stderr or result.stdout or '').strip()}")
-    finally:
-        Path(handle.name).unlink(missing_ok=True)
-    return target
+    client.kv_write(reference.path, {**data, reference.key: value}, version)
+    return reference
 
 
-def rotate_secret(
-    file_name: str, key: str, new_value: str, secrets_dir: Path = SECRETS_DIR, runner: Runner = subprocess.run,
-) -> Path:
-    """Re-encrypt `file_name`'s `key` with `new_value`, keeping the same recipients and reference."""
-    target = secrets_dir / file_name
-    if not target.exists():
-        raise ConfigurationError(f"{target}: cannot rotate a secret that does not exist")
-    result = runner(
-        ["sops", "--set", f'["{key}"] {json.dumps(new_value)}', str(target)],
-        capture_output=True, text=True, timeout=30,
-    )
-    if result.returncode != 0:
-        raise ConfigurationError(f"sops rotation failed: {(result.stderr or result.stdout or '').strip()}")
-    return target
+def read_secrets(client: Client, platform: Platform) -> dict[str, str]:
+    """Every referenced secret by reference name; fails naming all that hold no value."""
+    by_path: dict[str, dict[str, str]] = {}
+    values: dict[str, str] = {}
+    missing: list[str] = []
+    for name, reference in sorted(platform.secrets.items()):
+        if reference.path not in by_path:
+            by_path[reference.path] = client.kv_read(reference.path)[0]
+        value = by_path[reference.path].get(reference.key)
+        if not isinstance(value, str) or not value:
+            missing.append(f"{name} ({reference.path} key {reference.key})")
+        else:
+            values[name] = value
+    if missing:
+        raise ConfigurationError("these secrets hold no value in Vault: " + ", ".join(missing))
+    return values
 
 
-def materialize(
-    platform_path: Path, root: Path = ROOT, output_dir: Path = MATERIALIZED_SECRETS_DIR,
-    confirm_production_recipients: bool = False, runner: Runner = subprocess.run,
-) -> Platform:
-    """Decrypt every secret referenced by a validated platform document into `output_dir`.
-
-    `reference.file` is stored relative to the repository root (e.g. `secrets/local.sops.yaml`),
-    so sources are resolved against `root`, not a `secrets/`-only directory.
-    """
-    platform = load_platform(platform_path)
+def materialize(platform: Platform, client: Client, output_dir: Path = MATERIALIZED_SECRETS_DIR) -> None:
+    """Read every secret a validated platform document references into owner-only files under `output_dir`."""
     if output_dir.exists():
         mode = stat.S_IMODE(output_dir.stat().st_mode)
         if mode != 0o700:
             raise ConfigurationError(
                 f"{output_dir}: refusing to materialize into an existing directory with unexpected permissions {oct(mode)}"
             )
-    else:
-        output_dir.mkdir(mode=0o700)
-    for reference in platform.secrets.values():
-        source = root / reference.file
-        recipients = _extract_sops_recipients(source)
-        guard_production_recipients(platform.profile, recipients, confirm_production_recipients)
-        result = runner(
-            ["sops", "--decrypt", "--extract", f'["{reference.key}"]', str(source)],
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode != 0:
-            raise ConfigurationError(f"sops decryption failed for {source}: {(result.stderr or result.stdout or '').strip()}")
-        target_dir = output_dir / reference.file
-        target_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        target_path = target_dir / reference.key
-        target_path.write_text(result.stdout, encoding="utf-8")
-        target_path.chmod(0o600)
-    return platform
+    # Everything is read before anything is written, so a missing secret leaves no partial result.
+    values = read_secrets(client, platform)
+    output_dir.mkdir(mode=0o700, exist_ok=True)
+    wanted: set[Path] = set()
+    for name, value in values.items():
+        target = materialized_path(output_dir, platform.secrets[name])
+        directory = output_dir
+        for part in target.parent.relative_to(output_dir).parts:
+            directory = directory / part
+            directory.mkdir(mode=0o700, exist_ok=True)
+            directory.chmod(0o700)
+        if not target.exists() or target.read_text(encoding="utf-8") != value:
+            target.write_text(value, encoding="utf-8")
+        target.chmod(0o600)
+        wanted.add(target)
+    root = output_dir / "kv"
+    for path in sorted(root.rglob("*"), reverse=True):
+        if path.is_file() and path not in wanted:
+            path.unlink()
+        elif path.is_dir() and not any(path.iterdir()):
+            path.rmdir()
 
 
 def cleanup(output_dir: Path = MATERIALIZED_SECRETS_DIR) -> None:
-    """Remove the decrypted contents of a prior materialization directory."""
+    """Remove the contents of a prior materialization directory."""
     if output_dir.exists():
         shutil.rmtree(output_dir)

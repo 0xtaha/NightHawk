@@ -13,10 +13,11 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable
 from urllib.parse import quote
 
-from nighthawk.config import ConfigurationError, Platform, Stream
+from nighthawk.config import ConfigurationError, Credential, Platform, Stream
+from nighthawk.secrets import materialized_path
 
 # method, path, JSON body, organization ID -> (status, decoded JSON body)
 Client = Callable[[str, str, object, int | None], tuple[int, object]]
@@ -67,17 +68,50 @@ def _json_data(stream: Stream, signal: str) -> dict:
     return data
 
 
-def desired_state(platform: Platform) -> dict:
+def query_credentials(platform: Platform, chosen: Iterable[str] = ()) -> dict[tuple[str, str], Credential]:
+    """The query credential each datastream's data sources use.
+
+    A datastream with several query credentials, as during a rotation, needs one named in
+    `chosen`; nothing is picked by an implicit order.
+    """
+    declared = {item.id: item for item in platform.credentials}
+    named: dict[tuple[str, str], Credential] = {}
+    for credential_id in chosen:
+        credential = declared.get(credential_id)
+        if credential is None or credential.permission != "query":
+            raise ConfigurationError(f"{credential_id!r} is not a query credential of any datastream")
+        pair = (credential.tenant, credential.datastream)
+        if pair in named and named[pair].id != credential_id:
+            raise ConfigurationError(
+                f"{pair[0]}/{pair[1]}: both {named[pair].id} and {credential_id} were named; choose one"
+            )
+        named[pair] = credential
+    selected: dict[tuple[str, str], Credential] = {}
+    for stream in platform.streams:
+        pair = (stream.tenant, stream.datastream)
+        candidates = sorted(
+            (item for item in platform.credentials if (item.tenant, item.datastream, item.permission) == (*pair, "query")),
+            key=lambda item: item.id,
+        )
+        if pair in named:
+            selected[pair] = named[pair]
+        elif len(candidates) == 1:
+            selected[pair] = candidates[0]
+        else:
+            raise ConfigurationError(
+                f"{pair[0]}/{pair[1]}: several query credentials are declared "
+                f"({', '.join(item.id for item in candidates)}); choose one explicitly with --credential"
+            )
+    return selected
+
+
+def desired_state(platform: Platform, credentials: Iterable[str] = ()) -> dict:
     """One organization per tenant; one data source per datastream and enabled signal."""
     base = platform.gateway.url(platform.gateway.grafana_entry_point)
     organizations: dict[str, list[dict]] = {}
+    selected = query_credentials(platform, credentials)
     for stream in platform.streams:
-        # With overlapping query credentials during a rotation, use the first by ID.
-        credential = min(
-            (item for item in platform.credentials
-             if (item.tenant, item.datastream, item.permission) == (stream.tenant, stream.datastream, "query")),
-            key=lambda item: item.id,
-        )
+        credential = selected[(stream.tenant, stream.datastream)]
         datasources = organizations.setdefault(stream.tenant, [])
         for signal in sorted(stream.signals):
             _, kind, path = SIGNAL_TYPES[signal]
@@ -202,6 +236,11 @@ def reconcile(
             body["secureJsonData"] = {"basicAuthPassword": read_secret(datasource["secret_ref"])}
             if current is None:
                 _expect(client, "POST", "/api/datasources", body, org_id, (200,))
+                # Grafana makes the first data source of an organization its default whatever was
+                # sent. Read it back and correct it now, so the next apply has nothing to change.
+                _, stored = _expect(client, "GET", f"/api/datasources/uid/{uid}", None, org_id, (200,))
+                if any(stored.get(key) != datasource[key] for key in COMPARED_FIELDS):
+                    _expect(client, "PUT", f"/api/datasources/uid/{uid}", body, org_id, (200,))
             else:
                 _expect(client, "PUT", f"/api/datasources/uid/{uid}", body, org_id, (200,))
         for uid, item in sorted(existing.items()):
@@ -221,7 +260,7 @@ def secret_reader(platform: Platform, secrets_dir: Path) -> Callable[[str], str]
     def read(secret_ref: str) -> str:
         reference = platform.secrets[secret_ref]
         try:
-            return (secrets_dir / reference.file / reference.key).read_text(encoding="utf-8").rstrip("\r\n")
+            return materialized_path(secrets_dir, reference).read_text(encoding="utf-8").rstrip("\r\n")
         except (OSError, UnicodeError) as error:
             raise ConfigurationError(f"{secret_ref}: materialized secret is not readable ({type(error).__name__})") from None
 

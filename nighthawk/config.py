@@ -163,13 +163,42 @@ class Credential:
 
 @dataclass(frozen=True)
 class SecretReference:
-    file: str
+    """A key at a path inside the Vault key-value mount."""
+
+    path: str
     key: str
+
+
+@dataclass(frozen=True)
+class Vault:
+    """Where Vault is and which mounts and roles the platform uses. Never a credential."""
+
+    address: str
+    namespace: str | None
+    ca_file: str | None
+    kv_mount: str
+    pki_mount: str
+    server_role: str
+    client_role: str
+
+    @property
+    def loopback(self) -> bool:
+        host = urlsplit(self.address).hostname or ""
+        try:
+            return ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            return host == "localhost"
+
+    @property
+    def plaintext(self) -> bool:
+        return urlsplit(self.address).scheme != "https"
 
 
 @dataclass(frozen=True)
 class TLS:
     enabled: bool
+    # "system" roots, the platform "pki" authority, or a CA certificate stored as a "secret".
+    trust: str
     ca_secret_ref: str | None
 
 
@@ -213,8 +242,6 @@ class Gateway:
     hostname: str
     entry_points: tuple[EntryPoint, ...]
     grafana_entry_point: str
-    client_ca_secret_ref: str
-    client_ca_key_secret_ref: str | None
     auth_service: str
     upstreams: dict[str, str]
     revoked_certificate_fingerprints: tuple[str, ...]
@@ -240,6 +267,7 @@ class Platform:
     schema_version: int
     deployment: str
     profile: str
+    vault: Vault
     gateway: Gateway
     grafana: Grafana
     storage_provider: str
@@ -300,8 +328,16 @@ def _storage(
         bucket_names.add(bucket)
         tls = mapping(item["tls"])
         ca = tls["ca_secret_ref"]
+        trust = string(tls.get("trust", "system" if ca is None else "secret"))
+        if (trust == "secret") != (ca is not None):
+            raise ConfigurationError(f"{name}: tls.ca_secret_ref is required for, and only for, tls.trust: secret")
         if ca is not None:
             _require_secret(string(ca), secrets, name)
+        # The local SeaweedFS server certificate is signed by the platform PKI authority.
+        if (provider == "seaweedfs") != (trust == "pki"):
+            raise ConfigurationError(
+                f"{name}: local SeaweedFS storage requires tls.trust: pki, and only local storage may use it"
+            )
         identity = mapping(item["identity"])
         identity_type, ref = string(identity["type"]), string(identity["ref"])
         capabilities = mapping(item["capabilities"])
@@ -321,7 +357,7 @@ def _storage(
         identity_owners[ref] = owner
         bindings[name] = StorageBinding(
             "s3", endpoint, string(item["region"]), bucket, boolean(item["force_path_style"]),
-            TLS(True, ca), Identity(identity_type, ref),
+            TLS(True, trust, ca), Identity(identity_type, ref),
             Capabilities(boolean(capabilities["versioning"]), boolean(capabilities["lifecycle"]), workload_identity),
         )
     return provider, bindings
@@ -337,9 +373,32 @@ UPSTREAM_DESTINATION = {
 }
 
 
-def _gateway(
-    data: dict, secrets: dict[str, SecretReference], enabled_signals: set[str], rules: list[dict]
-) -> Gateway:
+def _vault(data: dict, profile: str) -> Vault:
+    pki = mapping(data["pki"])
+    vault = Vault(
+        string(data["address"]), data.get("namespace"), data.get("ca_file"), string(data["kv_mount"]),
+        string(pki["mount"]), string(pki["server_role"]), string(pki["client_role"]),
+    )
+    try:
+        port = urlsplit(vault.address).port
+    except ValueError as error:
+        raise ConfigurationError(f"vault: invalid address: {error}") from error
+    if port == 0:
+        raise ConfigurationError("vault: invalid address: port must be greater than zero")
+    if vault.plaintext and not vault.loopback:
+        raise ConfigurationError(f"vault: {vault.address} is plaintext; only a loopback address may use http")
+    if profile == "production" and (vault.plaintext or vault.loopback):
+        raise ConfigurationError(
+            f"vault: profile: production refuses the plaintext or loopback address {vault.address}"
+        )
+    if vault.kv_mount == vault.pki_mount:
+        raise ConfigurationError("vault: kv_mount and pki.mount must differ")
+    if vault.server_role == vault.client_role:
+        raise ConfigurationError("vault: pki.server_role and pki.client_role must differ")
+    return vault
+
+
+def _gateway(data: dict, enabled_signals: set[str], rules: list[dict]) -> Gateway:
     listeners = {rule["id"]: rule for rule in rules if rule["destination"] == "gateway"}
     by_port: dict[int, list[dict]] = {}
     for raw in sequence(data["entry_points"]):
@@ -361,11 +420,6 @@ def _gateway(
     grafana_entry_point = string(data["grafana_entry_point"])
     if not any(grafana_entry_point in entry.rules for entry in entry_points):
         raise ConfigurationError(f"gateway: grafana_entry_point {grafana_entry_point!r} is not a selected entry point")
-    ca = string(data["client_ca_secret_ref"])
-    _require_secret(ca, secrets, "gateway")
-    ca_key = data.get("client_ca_key_secret_ref")
-    if ca_key is not None:
-        _require_secret(string(ca_key), secrets, "gateway")
 
     def check_port(name: str, address: str, destination: str) -> str:
         port = urlsplit(address).port
@@ -391,7 +445,7 @@ def _gateway(
     if missing:
         raise ConfigurationError(f"gateway: missing upstreams for enabled signals: {', '.join(sorted(missing))}")
     return Gateway(
-        string(data["hostname"]), entry_points, grafana_entry_point, ca, ca_key, auth_service, upstreams,
+        string(data["hostname"]), entry_points, grafana_entry_point, auth_service, upstreams,
         tuple(sorted(string(item) for item in sequence(data["revoked_certificate_fingerprints"]))),
     )
 
@@ -407,14 +461,21 @@ def load_platform(
                 f"{storage_output}: expected the direct storage value; use 'terraform output -json storage'"
             )
         document["storage"] = storage
+    if document.get("schema_version") == 1:
+        raise ConfigurationError(
+            f"{path}: schema_version 1 is no longer supported. Version 2 stores secrets in Vault: add a "
+            "`vault` section (address, kv_mount, pki), change each `secrets` entry from {file, key} to "
+            "{path, key}, remove gateway.client_ca_secret_ref and gateway.client_ca_key_secret_ref, and "
+            "set tls.trust on storage bindings. See docs/02-configuration.md."
+        )
     data = _validate_document(document, path, "platform.schema.json")
     secrets = {
-        name: SecretReference(string(mapping(item)["file"]), string(mapping(item)["key"]))
+        name: SecretReference(string(mapping(item)["path"]), string(mapping(item)["key"]))
         for name, item in sorted(mapping(data["secrets"]).items())
     }
-    locations = [(secret.file, secret.key) for secret in secrets.values()]
+    locations = [(secret.path, secret.key) for secret in secrets.values()]
     if len(set(locations)) != len(locations):
-        raise ConfigurationError("secret references must not alias the same encrypted file/key")
+        raise ConfigurationError("secret references must not alias the same Vault path and key")
     streams: list[Stream] = []
     pairs: dict[tuple[str, str], str] = {}
     tenant_ids: set[str] = set()
@@ -499,13 +560,13 @@ def load_platform(
     if used_secrets & storage_refs:
         raise ConfigurationError("gateway credentials must not reuse object-storage secrets")
     gateway = _gateway(
-        mapping(data["gateway"]), secrets,
+        mapping(data["gateway"]),
         {name for stream in streams for name in stream.signals},
         load_network(network if network is not None else ROOT / "config" / "network.yaml"),
     )
-    trust_refs = {gateway.client_ca_secret_ref, gateway.client_ca_key_secret_ref}
+    trust_refs = {binding.tls.ca_secret_ref for binding in bindings.values() if binding.tls.ca_secret_ref}
     if (used_secrets | storage_refs) & trust_refs:
-        raise ConfigurationError("gateway CA references must not reuse credential or object-storage secrets")
+        raise ConfigurationError("storage CA references must not reuse credential or object-storage secrets")
     raw_grafana = mapping(data["grafana"])
     grafana = Grafana(string(raw_grafana["hostname"]), string(raw_grafana["admin_secret_ref"]))
     if grafana.hostname == gateway.hostname:
@@ -513,8 +574,9 @@ def load_platform(
     _require_secret(grafana.admin_secret_ref, secrets, "grafana")
     if grafana.admin_secret_ref in used_secrets | storage_refs | trust_refs:
         raise ConfigurationError("grafana: admin_secret_ref must not reuse another secret")
+    profile = string(data["profile"])
     return Platform(
-        1, deployment, string(data["profile"]), gateway, grafana, provider, bindings, secrets,
+        2, deployment, profile, _vault(mapping(data["vault"]), profile), gateway, grafana, provider, bindings, secrets,
         tuple(sorted(streams, key=lambda stream: (stream.tenant, stream.datastream))),
         tuple(sorted(credentials, key=lambda credential: credential.id)),
     )
@@ -531,8 +593,61 @@ def validate_migration(platform: Platform, previous: Platform) -> None:
             raise ConfigurationError(f"{stream.backend_id}: backend ID cannot be reassigned to another tenant/datastream")
 
 
+def release(version: str) -> tuple[int, ...]:
+    """Parse a dotted release such as `2.1.2`, ignoring any build or edition suffix."""
+    match = re.match(r"v?([0-9]+(?:\.[0-9]+)*)", version)
+    if match is None:
+        raise ConfigurationError(f"{version!r} is not a release version")
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def vault_supports(matrix: dict, version: str) -> bool:
+    """Whether a Vault server version lies in the matrix's supported range."""
+    supported = mapping(mapping(mapping(matrix["secrets_store"])["vault"])["supported"])
+    return release(string(supported["minimum"])) <= release(version) < release(string(supported["below"]))
+
+
+# Helm charts that package a backend the matrix also pins.
+CHART_BACKEND = {"loki": "loki", "tempo_distributed": "tempo", "mimir_distributed": "mimir", "pyroscope": "pyroscope"}
+
+
+def chart_version_problems(matrix: dict) -> list[str]:
+    """Charts whose application version disagrees with the backend pin without a recorded reason, or agree despite one."""
+    problems: list[str] = []
+    charts, backends = mapping(matrix["grafana_charts"]), mapping(matrix["backends"])
+    for chart, backend in sorted(CHART_BACKEND.items()):
+        entry = mapping(charts[chart])
+        packaged, pinned = string(entry["app_version"]), string(mapping(backends[backend])["version"])
+        excepted = "app_version_exception" in entry
+        if packaged != pinned and not excepted:
+            problems.append(
+                f"grafana_charts.{chart} packages {backend} {packaged} but backends.{backend} pins {pinned}; "
+                "pin a chart release that matches, or record an app_version_exception with a reason"
+            )
+        elif packaged == pinned and excepted:
+            problems.append(
+                f"grafana_charts.{chart} records an app_version_exception, but it packages the pinned "
+                f"{backend} {pinned}; remove the stale exception"
+            )
+    return problems
+
+
 def load_versions(path: Path = ROOT / "config" / "versions.yaml") -> dict:
-    return load_document(path, "versions.schema.json")
+    matrix = load_document(path, "versions.schema.json")
+    problems = chart_version_problems(matrix)
+    if problems:
+        raise ConfigurationError(f"{path}:\n" + "\n".join(problems))
+    vault = mapping(mapping(matrix["secrets_store"])["vault"])
+    supported = mapping(vault["supported"])
+    tested = string(vault["version"])
+    if not vault_supports(matrix, tested):
+        raise ConfigurationError(
+            f"{path}: the tested Vault version {tested} is outside the supported range "
+            f"{supported['minimum']} (inclusive) to {supported['below']} (exclusive)"
+        )
+    if string(mapping(vault["image"])["tag"]) != tested:
+        raise ConfigurationError(f"{path}: the Vault test image tag must equal the tested version {tested}")
+    return matrix
 
 
 def is_os_supported(matrix: dict, target: str, distribution: str, version: str, architecture: str) -> bool:

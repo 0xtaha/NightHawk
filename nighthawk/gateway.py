@@ -15,6 +15,7 @@ import yaml
 
 from nighthawk.authz import secret_digest
 from nighthawk.config import ConfigurationError, Platform
+from nighthawk.secrets import materialized_path
 
 # Mount points the deployment provides to the proxy; the files come from the trust lifecycle.
 CONFIG_DIR = "/etc/nighthawk/gateway"
@@ -230,7 +231,7 @@ def policy_bundle(platform: Platform, secrets_dir: Path) -> dict:
     for credential in platform.credentials:
         reference = platform.secrets[credential.secret_ref]
         try:
-            secret = (secrets_dir / reference.file / reference.key).read_text(encoding="utf-8").rstrip("\r\n")
+            secret = materialized_path(secrets_dir, reference).read_text(encoding="utf-8").rstrip("\r\n")
         except (OSError, UnicodeError) as error:
             raise ConfigurationError(
                 f"{credential.id}: materialized secret is not readable ({type(error).__name__})"

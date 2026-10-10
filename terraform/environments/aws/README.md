@@ -29,6 +29,33 @@ terraform validate
 Expected result: configuration is valid. This checks neither credentials nor
 actual AWS permissions, quotas, or subnet/CIDR availability.
 
+To plan the example values against a mocked provider, still without AWS
+access:
+
+```text
+terraform test -var-file=terraform.tfvars.example
+```
+
+Expected result: one passing run. It confirms the example values are accepted
+and that every node carries the cluster's security group and the
+contract-derived one. It is a plan with mocked values, not evidence of a
+deployment.
+
+## Required inputs without defaults
+
+`endpoint_public_access`, `public_access_cidrs`, and
+`cluster_admin_principal_arns` must be set; see
+[cluster access](../../modules/aws-eks/README.md#cluster-access). The
+principal that applies this root gets no cluster access unless it is listed.
+`secrets_kms_key_arn` and the three controller inputs are optional; see
+[encryption at rest](../../modules/aws-eks/README.md#encryption-at-rest) and
+[controller identities](../../modules/aws-eks/README.md#controller-identities).
+
+A plan made from an earlier revision of this root will show the new access
+entries, KMS key, launch templates, and controller roles as additions, and
+both node groups as replaced because they move onto launch templates. Nothing
+from any revision has been applied by this project.
+
 ## Apply order
 
 1. Apply [`aws-state-bootstrap`](../aws-state-bootstrap/README.md) once per
@@ -57,6 +84,7 @@ terraform output -raw oidc_provider_arn
 terraform output -raw oidc_issuer_url
 terraform output -json public_subnet_ids
 terraform output -json private_subnet_ids
+terraform output -json controller_role_arns
 ```
 
 Inspect the saved plan before applying. Copy the `oidc_provider_arn`/
@@ -69,9 +97,10 @@ exactly.
 
 `main.tf`'s `network_rules` local literally mirrors `config/network.yaml`'s
 AWS-destined rules (`destination` prefixed `aws-`; currently only
-`aws-object-storage`). `tests/test_terraform_boundaries.py` asserts this
-mapping's rule count and IDs stay in sync with the network contract -
-update both when a new AWS-destined rule is added to or removed from
+`aws-object-storage`). `tests/test_terraform_boundaries.py` compares every
+field of every mirrored rule (source, destination, protocol, port, scope)
+with the network contract and names the rule and field that differ - update
+both when an AWS-destined rule is added to, removed from, or changed in
 `config/network.yaml`.
 
 ## Troubleshooting and teardown

@@ -8,9 +8,10 @@ for all four backends, the Traefik gateway configuration, and the Grafana
 desired state. Separate commands render a collector configuration with
 collection-time redaction, render the gateway auth policy from materialized
 secrets, run the auth service, manage gateway credentials and certificates,
-and provision Grafana. It implements the full SOPS + age secrets lifecycle
-gated on a `doctor` prerequisite check, and a `check-pins` drift check against
-the compatibility matrix.
+and provision Grafana. Secrets are stored in, and certificates are signed by,
+a HashiCorp Vault that you provide; every command that touches it is gated on
+the `doctor` prerequisite check. A `check-pins` drift check compares consumers
+with the compatibility matrix.
 
 `quickstart-docker` starts the whole platform with Docker Compose
 ([quickstart](00-quickstart.md)). Gateway enforcement, redaction, override
@@ -35,8 +36,39 @@ python -m venv .venv
 ```
 
 On Linux, invoke the same Python commands using the virtual environment's
-`bin/python` executable. No cloud credentials, daemon, or secret files are needed
-for these non-secret contract checks.
+`bin/python` executable. No cloud credentials, daemon, Vault, or secret files
+are needed for these non-secret contract checks: `validate` and
+`render-contracts` never contact Vault.
+
+The unit tests use an in-memory fake of Vault and need no server. Eight
+integration tests run against a real one and are reported as skipped, with
+the reason, unless you point them at a disposable dev-mode Vault
+([development Vault](#development-vault)) and give them its root token:
+
+```console
+$ NIGHTHAWK_VAULT_TEST_ADDR=http://127.0.0.1:8200 VAULT_TOKEN="$(cat .generated/vault-token)" \
+    python -m unittest discover -s tests -p "test_*.py"
+```
+
+They create mounts and a policy of their own with a random `nhtest-` prefix
+and remove them afterwards. One of them enables the `approle` auth method if
+it is absent and disables it again. Do not point them at a Vault you care
+about.
+
+The Terraform contract tests need the pinned Terraform. They are reported as
+skipped, with the reason, when it is absent. To download it into the ignored
+`.tools/` directory, checked against the checksum in `config/versions.yaml`
+(Linux on x86-64 or arm64 only):
+
+```console
+$ python -m nighthawk fetch-tools
+Installed terraform into /path/to/NightHawk/.tools
+```
+
+The tests look for `$NIGHTHAWK_TERRAFORM`, then `.tools/terraform`, then
+`terraform` on `PATH`. They run `terraform test` in the two storage modules,
+so each must have been initialized once with
+`terraform init -backend=false`, which downloads the pinned AWS provider.
 
 Expected validation output reports the datastream and network-rule counts.
 Errors identify the invalid field or cross-resource relationship and return a
@@ -61,7 +93,7 @@ retention**, not production defaults.
   all durations must fit Go's signed duration representation. Version-specific
   runtime validation and deletion tests remain necessary.
 - Every datastream has distinct ingestion and query credentials. References
-  cannot alias the same encrypted file/key or cross signal backend boundaries.
+  cannot alias the same Vault path and key or cross signal backend boundaries.
 - Optional ingestion certificate identities use
   `spiffe://nighthawk/<tenant>/<datastream>/<collector>`. The contract checks
   mapping consistency, not actual certificate validity or revocation.
@@ -71,6 +103,42 @@ retention**, not production defaults.
   is not evidence that telemetry has been sanitized.
 - Several credentials may be declared for the same tenant/datastream and
   permission. That is how a gateway credential is rotated without a gap.
+
+### Vault block
+
+The required `vault` object says where Vault is and which mounts and roles the
+platform uses. It never holds a credential; see
+[authentication](#authenticating-to-vault).
+
+| Field | Meaning |
+| --- | --- |
+| `address` | Origin of the Vault server. `http://` is accepted only for a loopback address, which is what a dev-mode server uses |
+| `namespace` | Optional. Sent as the `X-Vault-Namespace` header. Not exercised against a real namespace |
+| `ca_file` | Optional absolute path to the CA bundle that verifies Vault's own TLS certificate. The system roots are used when it is absent |
+| `kv_mount` | Mount path of a key-value **version 2** secrets engine |
+| `pki.mount` | Mount path of the PKI secrets engine whose authority signs every certificate |
+| `pki.server_role`, `pki.client_role` | PKI roles for the gateway and storage server certificates, and for collector client certificates |
+
+A document with `profile: production` is rejected when `address` is plaintext
+or loopback.
+
+### Secret references
+
+Each entry of the `secrets` map names a key at a path inside `kv_mount`:
+
+```yaml
+secrets:
+  example-ingest: {path: nighthawk/local, key: example-ingest}
+```
+
+Several references may share a path; two references may not name the same
+path and key. Everything else in the document refers to a secret by its name
+in this map (`secret_ref`, `admin_secret_ref`, `identity.ref`,
+`tls.ca_secret_ref`), so rotating a value never changes the document.
+
+A document with `schema_version: 1` (secrets as `{file, key}` under
+`secrets/`, and CA references on the gateway) is rejected with a message that
+lists what changed.
 
 ### Gateway block
 
@@ -82,8 +150,6 @@ Every address is explicit; nothing is derived from `deployment`.
 | `hostname` | DNS name collectors and Grafana data sources use; also the gateway server certificate's name |
 | `entry_points` | IDs of `config/network.yaml` rules whose destination is `gateway`. The gateway listens on exactly their ports. Rules sharing a port share one listener, which takes the most exposed scope among them |
 | `grafana_entry_point` | The selected entry point Grafana data sources connect to |
-| `client_ca_secret_ref` | Secret holding the CA certificate that verifies collector certificates |
-| `client_ca_key_secret_ref` | Optional. Secret holding that CA's private key, only for a locally managed CA |
 | `auth_service` | Private address of the NightHawk auth service that Traefik calls |
 | `upstreams` | Backend addresses per signal: `metrics`, `logs`, `profiles`, and for `traces` the `query`, `otlp_grpc`, and `otlp_http` addresses. Required for every signal any datastream enables. `grafana` is always required: the address the Grafana UI is forwarded to |
 | `revoked_certificate_fingerprints` | Lowercase hex SHA-256 fingerprints of collector certificates the gateway must refuse |
@@ -93,6 +159,10 @@ that component (`mimir`, `loki`, `tempo`, `pyroscope`, `grafana`, `auth-service`
 network contract stays the single owner of ports. `http://` upstreams are
 plaintext links and must stay on a private network; see
 [gateway](05-gateway.md).
+
+The gateway verifies collector certificates against the public certificate of
+the authority in `vault.pki.mount`. The document cannot reference a CA
+certificate or a CA private key: the platform never holds the key.
 
 ### Grafana block
 
@@ -112,13 +182,11 @@ configuration is rendered.
 
 ```console
 $ python -m nighthawk generate-storage-identity --config config/tenants.example.yaml --identity mimir-storage
-Generated and encrypted the storage keys for mimir-storage in secrets/local.sops.yaml
+Generated the storage keys for mimir-storage in Vault at nighthawk/local key mimir-storage
 ```
 
-Secret references point to SOPS-encrypted files under `secrets/`; no decryption
-occurs during contract validation. Actual encrypted files, age recipients,
-trust establishment, rotation, and runtime materialization are later deployment
-prerequisites. Do not put plaintext values in this contract.
+No secret is read during contract validation. Do not put plaintext values in
+this contract.
 
 ## Storage interface
 
@@ -134,7 +202,8 @@ Each logical bucket binding contains:
 | `protocol` | `s3` |
 | `endpoint`, `region`, `bucket` | HTTPS origin and explicit storage location |
 | `force_path_style` | Explicit S3 addressing choice |
-| `tls.enabled`, `tls.ca_secret_ref` | TLS required; optional private-CA reference |
+| `tls.enabled` | TLS is required |
+| `tls.trust`, `tls.ca_secret_ref` | What verifies the endpoint's certificate: `system` roots, the platform `pki` authority, or a CA certificate stored as a `secret` named by `ca_secret_ref`. Local SeaweedFS must use `pki`, because its server certificate is signed by that authority, and nothing else may. When `trust` is absent, as in the Terraform output, it is `system` for a null `ca_secret_ref` and `secret` otherwise |
 | `identity.type`, `identity.ref` | Local secret reference or AWS IRSA role ARN |
 | `capabilities` | Versioning, lifecycle, and workload-identity declarations |
 
@@ -175,17 +244,14 @@ they do not prove real AWS access or retention enforcement.
 This produces `platform.json`, `network.json`, `ports.md`, one
 `<backend>-overrides.yaml` per signal backend, `unenforced-limits.json`,
 `gateway/` (Traefik configuration and route table),
-`grafana/desired-state.json`, and, for a `docker` deployment, `backends/`
+`grafana/desired-state.json`, `vault/` ([what the platform needs from
+Vault](#what-the-platform-needs-from-vault)), and, for a `docker` deployment, `backends/`
 with each backend's own configuration ([Docker Compose](07-docker-compose.md)). `pyroscope-overrides.yaml` uses the approved Pyroscope 2.3.1 v2
 `retention_period` field, without a default retention or overrides for disabled
 profiling streams. A version/storage-mode/field change fails until its
 compatibility is explicitly reviewed. The fragment still requires a configured
 Pyroscope runtime override loader and metastore deletion acceptance tests;
 rendering it does not prove retention enforcement.
-
-`config/versions.yaml` records source-verified candidates, not a complete image
-digest lock or a runtime-tested matrix. Remaining component/chart/tool pins
-must be resolved before deployment.
 
 Output ordering
 and newlines are deterministic. The output directory must not already exist;
@@ -208,55 +274,162 @@ command is implemented yet.
 
 ## Secrets workflow
 
-Every secrets subcommand first runs the same prerequisite check as
-`nighthawk doctor`: it shells out to `sops --version` and `age --version` and
-compares the result to the pins in `config/versions.yaml`. If either binary is
-missing or mismatched, the command exits nonzero and writes no file:
+Secrets live in the Vault the platform document declares. You provide that
+Vault: the platform never deploys, initializes, unseals, or backs one up, and
+it is tested only against HashiCorp Vault 2.1.2 in dev mode. The supported
+server range is in `config/versions.yaml` under `secrets_store.vault`.
+
+### What the platform needs from Vault
+
+`render-contracts` writes two non-secret files for you to apply:
+
+- `vault/policy.hcl`: an ACL policy that allows creating, reading, and
+  updating exactly the declared secret paths, signing with the two PKI roles,
+  reading those roles, revoking a certificate, and looking up its own token.
+  Nothing else.
+- `vault/pki-roles.json`: the two role definitions. The server role allows
+  only the gateway, Grafana, and local storage hostnames, for server use. The
+  collector role allows only the declared certificate identities as URI names,
+  for client use. Both cap validity at 9528 hours (397 days).
+
+Before the platform can be used you need, in Vault: a key-value version 2
+mount and a PKI mount with a certificate authority at the declared paths, the
+two roles written from `vault/pki-roles.json`, and a token or AppRole carrying
+the policy.
+
+Apply the files again whenever the hostnames, the collector certificate
+identities, or the secret paths in the document change. `doctor` names any
+declared name a role in Vault would refuse.
+
+### Authenticating to Vault
+
+A command that needs Vault takes its credential from, in order:
+
+1. the `VAULT_TOKEN` environment variable;
+2. `--vault-token-file`, a file holding a token;
+3. `--vault-role-id-file` together with `--vault-secret-id-file`, for an
+   AppRole login at the `approle` auth mount. The resulting token is used for
+   that one command and is not stored.
+
+Credential files must be readable by their owner only. No command accepts a
+credential as an argument, and none is ever written to the platform document,
+the Compose environment file, the materialization directory, or the output.
+
+For `profile: production`, a credential that carries Vault's `root` policy is
+refused before anything is read or written.
+
+### Prerequisite check
+
+Every command that reads or writes a secret or requests a certificate first
+runs the same check as `nighthawk doctor`, and stops before doing anything if
+it fails. The examples from here on assume `VAULT_TOKEN` is set; add
+`--vault-token-file` otherwise.
 
 ```console
-$ python -m nighthawk doctor --versions config/versions.yaml
-FAIL: sops is not available: [Errno 2] No such file or directory: 'sops'
-FAIL: age is not available: [Errno 2] No such file or directory: 'age'
+$ python -m nighthawk doctor --config config/tenants.example.yaml
+ok: Vault 2.1.2 at http://127.0.0.1:8200 is reachable and unsealed
+ok: Vault 2.1.2 is supported
+ok: the Vault credential is accepted
+ok: key-value mount nighthawk-kv is version 2
+ok: PKI mount nighthawk-pki has a certificate authority
+ok: PKI role nighthawk-server is present
+ok: PKI role nighthawk-collector is present
 ```
 
-With `sops`/`age` installed and matching their pinned versions:
+It fails, naming each problem, when Vault is unreachable, sealed, or not
+initialized; reports a version outside the supported range; rejects the
+credential; lacks a declared mount, authority, or role; or has a role that
+would refuse a declared hostname or identity. Against a dev-mode Vault that
+has not been bootstrapped:
 
 ```console
-# Generate a local age key pair (non-production use; refuses to overwrite
-# an existing file without --overwrite).
-python -m nighthawk generate-recipient --output secrets/dev.agekey
-
-# Encrypt a new secret value under secrets/<file> for one or more recipients.
-python -m nighthawk encrypt-secret --file local.sops.yaml --key mimir-storage \
-    --recipient age1exampleexampleexampleexampleexampleexampleexampleexamplex \
-    --value "s3-secret-key"
-
-# Rotate an existing key's value in place, keeping the same recipients.
-python -m nighthawk rotate-secret --file local.sops.yaml --key mimir-storage \
-    --value "new-s3-secret-key"
-
-# Decrypt every secret referenced by a validated platform document into
-# .materialized-secrets/ (created with owner-only 0700/0600 permissions).
-python -m nighthawk materialize-secrets --config config/tenants.example.yaml
-
-# Remove the decrypted material once it is no longer needed.
-python -m nighthawk clean-secrets
+$ python -m nighthawk doctor --config config/tenants.example.yaml
+ok: Vault 2.1.2 at http://127.0.0.1:8200 is reachable and unsealed
+ok: Vault 2.1.2 is supported
+ok: the Vault credential is accepted
+FAIL: key-value mount nighthawk-kv does not exist or is not readable
+FAIL: PKI mount nighthawk-pki does not exist or is not readable
+FAIL: PKI role nighthawk-server does not exist or is not readable
+FAIL: PKI role nighthawk-collector does not exist or is not readable
 ```
 
-`config/tenants.example.yaml` declares `profile: development`, so its
-secret references may resolve to locally auto-generated recipients.
-Documents with `profile: production` reject locally auto-generated age
-recipients recorded in `.generated/age-recipients.local.json` unless
-`--confirm-production-recipients` is passed explicitly, and require an
-explicit, non-empty recipient list.
+### Storing, rotating, and materializing
+
+A value is read from standard input, or from `--value-file`. It is never an
+argument.
+
+```console
+# Store a value at a reference that holds nothing yet.
+$ python -m nighthawk store-secret --config config/tenants.example.yaml --secret grafana-admin < password.txt
+Stored grafana-admin in Vault at nighthawk/local key grafana-admin
+
+# Replace an existing value. The reference in the platform document does not change.
+$ python -m nighthawk rotate-secret --config config/tenants.example.yaml --secret grafana-admin < new-password.txt
+Rotated grafana-admin in Vault at nighthawk/local key grafana-admin
+
+# Read every secret the document references into .materialized-secrets/.
+$ python -m nighthawk materialize-secrets --config config/tenants.example.yaml
+Materialized 7 secret(s) into /path/to/NightHawk/.materialized-secrets
+
+# Remove the materialized files once they are no longer needed.
+$ python -m nighthawk clean-secrets
+Cleaned /path/to/NightHawk/.materialized-secrets
+```
+
+- `store-secret` keeps every other key at the same path and refuses a key
+  that already holds a value. `rotate-secret` refuses a key that holds none.
+- Both write with Vault's check-and-set. If the path changed between the read
+  and the write, Vault rejects the write, nothing is overwritten, and the
+  command asks you to retry.
+- A rotated value becomes a new version. Vault keeps the earlier versions
+  until the mount's `max_versions` setting or an explicit destroy removes
+  them; the platform never destroys a version.
+- `materialize-secrets` writes each secret to
+  `.materialized-secrets/kv/<path>/<key>` with owner-only permissions (0700
+  directories, 0600 files). If any referenced secret holds no value it names
+  all of them and writes nothing.
+- `generate-credential` and `generate-storage-identity` store a generated
+  value the same way as `store-secret`; see [gateway](05-gateway.md).
+
+### Development Vault
+
+For local work and tests, a dev-mode Vault is enough. It keeps everything in
+memory and loses it when it stops, so use it only for throwaway data.
+
+```console
+$ mkdir -p .generated && (umask 077; openssl rand -hex 16 > .generated/vault-token)
+$ docker run --detach --name nighthawk-vault --cap-add IPC_LOCK \
+    --publish 127.0.0.1:8200:8200 \
+    --env VAULT_DEV_ROOT_TOKEN_ID="$(cat .generated/vault-token)" \
+    --env VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200 \
+    docker.io/hashicorp/vault@sha256:c2f666266f383d2cf424d86b8bb8ce7d065562173ffec2b476d762943608bb55 server -dev
+
+$ python -m nighthawk bootstrap-dev-vault --config config/tenants.example.yaml \
+    --vault-token-file .generated/vault-token --confirm-disposable-vault --ca-valid-days 365
+Configured the development Vault: mount nighthawk-kv, mount nighthawk-pki, certificate authority, PKI role nighthawk-server, PKI role nighthawk-collector, policy nighthawk
+```
+
+`.generated/` is ignored by Git, and the token file is created readable by
+you only. The token is the dev server's root token: it protects nothing beyond
+that throwaway container, and it stops working when the container stops.
+`--ca-valid-days` must cover the longest certificate you will ask for; the
+quickstart asks for 90 days by default.
+
+`bootstrap-dev-vault` applies the rendered policy and roles and creates a
+certificate authority inside Vault. It needs a credential with administrative
+access, refuses a `profile: production` document, and refuses to run without
+`--confirm-disposable-vault`. Running it again changes only what differs and
+never replaces an existing authority. For your own Vault, apply the rendered
+files instead.
 
 `nighthawk check-pins` compares each `tracked_consumers` entry in
-`config/versions.yaml` (the Terraform version files and the Alloy sources README) against
-the matrix pins and reports any divergence:
+`config/versions.yaml` (the Terraform version files, the Alloy sources
+README, and the Compose image references) against the matrix pins and reports
+any divergence:
 
 ```console
 $ python -m nighthawk check-pins
-All 19 tracked consumer(s) match the compatibility matrix.
+All 37 tracked consumer(s) match the compatibility matrix.
 ```
 
 ## Troubleshooting and cleanup
@@ -268,9 +441,15 @@ All 19 tracked consumer(s) match the compatibility matrix.
   the generated artifacts after reviewing them.
 - Dependency errors: use the isolated interpreter and install the pinned
   requirements; do not substitute system packages silently.
-- Missing or mismatched `sops`/`age`: run `nighthawk doctor` to see which
-  binary is absent or out of date; every secrets subcommand fails the same way
-  before writing any file.
+- `Vault prerequisite check failed`: run `nighthawk doctor` to see every
+  failing check. Every command that touches Vault fails the same way before
+  reading or writing anything.
+- `changed in Vault during write secret`: someone else wrote the same path at
+  the same moment. Nothing was overwritten; run the command again.
+- `does not allow <name>; apply the rendered vault/pki-roles.json`: the
+  document declares a hostname or collector identity the role in Vault would
+  refuse. Render the contracts and apply the roles, or for a development
+  Vault run `bootstrap-dev-vault` again.
 
 Validation and rendering create no remote resources and need no infrastructure
 rollback. Generated files are ignored by Git. A POSIX directory mode is requested

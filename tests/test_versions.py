@@ -8,7 +8,8 @@ from pathlib import Path
 import yaml
 
 from nighthawk.config import (
-    ROOT, ConfigurationError, check_pins, is_os_supported, load_versions, validate_pin_changes,
+    ROOT, ConfigurationError, chart_version_problems, check_pins, is_os_supported, load_versions, validate_pin_changes,
+    vault_supports,
 )
 
 
@@ -99,12 +100,78 @@ class VersionsTests(unittest.TestCase):
         with self.assertRaises(ConfigurationError):
             load_versions(self.write(document))
 
-    def test_missing_tool_checksum_fails(self) -> None:
-        for tool in ("sops", "age"):
+    def test_vault_entry_has_a_supported_range_and_a_tested_image(self) -> None:
+        vault = load_versions()["secrets_store"]["vault"]
+        self.assertEqual(vault["image"]["tag"], vault["version"])
+        self.assertRegex(vault["image"]["digest"], r"^sha256:[0-9a-f]{64}$")
+        self.assertTrue(vault["source"])
+        for field in ("supported", "image"):
             document = copy.deepcopy(self.matrix)
-            del document["secrets_tools"][tool]["sha256"]
+            del document["secrets_store"]["vault"][field]
             with self.assertRaises(ConfigurationError):
                 load_versions(self.write(document))
+
+    def test_tested_vault_version_must_lie_in_the_supported_range(self) -> None:
+        for minimum, below in (("9.0.0", "9.1.0"), ("1.0.0", "2.1.2")):
+            document = copy.deepcopy(self.matrix)
+            document["secrets_store"]["vault"]["supported"] = {"minimum": minimum, "below": below}
+            with self.assertRaisesRegex(ConfigurationError, "outside the supported range"):
+                load_versions(self.write(document))
+        document = copy.deepcopy(self.matrix)
+        document["secrets_store"]["vault"]["supported"] = {"minimum": "2.0.0", "below": "3.0.0"}
+        load_versions(self.write(document))  # inside the range
+
+    def test_vault_supports_compares_releases_numerically(self) -> None:
+        matrix = load_versions()
+        self.assertTrue(vault_supports(matrix, "2.1.2"))
+        self.assertTrue(vault_supports(matrix, "2.1.10+ent"))
+        self.assertFalse(vault_supports(matrix, "2.1.1"))
+        self.assertFalse(vault_supports(matrix, "2.2.0"))
+
+    def test_vault_test_image_tag_must_match_the_tested_version(self) -> None:
+        document = copy.deepcopy(self.matrix)
+        document["secrets_store"]["vault"]["image"]["tag"] = "2.1.1"
+        with self.assertRaisesRegex(ConfigurationError, "image tag"):
+            load_versions(self.write(document))
+
+    def test_chart_and_backend_versions_agree_in_the_real_matrix(self) -> None:
+        matrix = load_versions()
+        self.assertEqual(chart_version_problems(matrix), [])
+        for chart, backend in (("loki", "loki"), ("tempo_distributed", "tempo"), ("pyroscope", "pyroscope")):
+            self.assertEqual(matrix["grafana_charts"][chart]["app_version"], matrix["backends"][backend]["version"])
+            self.assertNotIn("app_version_exception", matrix["grafana_charts"][chart])
+        # The one recorded difference, with its reason.
+        self.assertIn("weekly", matrix["grafana_charts"]["mimir_distributed"]["app_version_exception"]["reason"])
+
+    def test_unrecorded_chart_difference_fails_naming_the_chart_and_both_versions(self) -> None:
+        document = copy.deepcopy(self.matrix)
+        document["grafana_charts"]["tempo_distributed"]["app_version"] = "3.1.0"
+        with self.assertRaises(ConfigurationError) as raised:
+            load_versions(self.write(document))
+        message = str(raised.exception)
+        self.assertIn("grafana_charts.tempo_distributed packages tempo 3.1.0 but backends.tempo pins 3.0.3", message)
+        self.assertIn("app_version_exception", message)
+
+    def test_recorded_chart_difference_passes(self) -> None:
+        document = copy.deepcopy(self.matrix)
+        document["grafana_charts"]["tempo_distributed"].update(
+            app_version="3.1.0", app_version_exception={"reason": "No chart release packages the pinned Tempo yet."},
+        )
+        load_versions(self.write(document))
+
+    def test_stale_chart_exception_fails_naming_the_chart(self) -> None:
+        document = copy.deepcopy(self.matrix)
+        document["grafana_charts"]["loki"]["app_version_exception"] = {"reason": "Was needed for an earlier pin only."}
+        with self.assertRaisesRegex(ConfigurationError, "grafana_charts.loki records an app_version_exception.*stale"):
+            load_versions(self.write(document))
+
+    def test_chart_exception_needs_a_real_reason(self) -> None:
+        for exception in ({}, {"reason": ""}, {"reason": "tbd"}, {"reason": "A long enough reason.", "extra": 1}):
+            with self.subTest(exception=exception):
+                document = copy.deepcopy(self.matrix)
+                document["grafana_charts"]["tempo_distributed"].update(app_version="3.1.0", app_version_exception=exception)
+                with self.assertRaises(ConfigurationError):
+                    load_versions(self.write(document))
 
     def test_every_compose_image_has_a_digest_and_its_pinned_version(self) -> None:
         matrix = load_versions()

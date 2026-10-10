@@ -1,17 +1,23 @@
 # End-to-end test document: two customers with two datastreams each.
 # acme/batch enables only metrics and logs; globex/edge has a certificate-bound collector.
 # Retention values are test values, not production defaults.
-schema_version: 1
+schema_version: 2
 deployment: docker
 profile: development
+vault:
+  # The end-to-end suite starts its own dev-mode Vault and replaces this address with that one.
+  address: http://127.0.0.1:8200
+  kv_mount: nighthawk-kv
+  pki:
+    mount: nighthawk-pki
+    server_role: nighthawk-server
+    client_role: nighthawk-collector
 gateway:
   hostname: gateway.nighthawk.internal
   entry_points:
   - local-gateway
   - grafana-gateway
   grafana_entry_point: grafana-gateway
-  client_ca_secret_ref: gateway-client-ca
-  client_ca_key_secret_ref: gateway-client-ca-key
   auth_service: http://authz:9180
   upstreams:
     grafana: http://grafana:3000
@@ -37,7 +43,8 @@ storage:
       force_path_style: true
       tls: &id001
         enabled: true
-        ca_secret_ref: storage-ca
+        trust: pki
+        ca_secret_ref: null
       identity: &id002
         type: secret
         ref: mimir-storage
@@ -97,53 +104,44 @@ storage:
         ref: pyroscope-storage
       capabilities: *id003
 secrets:
-  storage-ca:
-    file: secrets/e2e.sops.yaml
-    key: storage-ca
   mimir-storage:
-    file: secrets/e2e.sops.yaml
+    path: nighthawk/e2e
     key: mimir-storage
   loki-storage:
-    file: secrets/e2e.sops.yaml
+    path: nighthawk/e2e
     key: loki-storage
   tempo-storage:
-    file: secrets/e2e.sops.yaml
+    path: nighthawk/e2e
     key: tempo-storage
   pyroscope-storage:
-    file: secrets/e2e.sops.yaml
+    path: nighthawk/e2e
     key: pyroscope-storage
-  gateway-client-ca:
-    file: secrets/e2e.sops.yaml
-    key: gateway-client-ca
-  gateway-client-ca-key:
-    file: secrets/e2e.sops.yaml
-    key: gateway-client-ca-key
   grafana-admin:
-    file: secrets/e2e.sops.yaml
+    path: nighthawk/e2e
     key: grafana-admin
   acme-web-ingest:
-    file: secrets/e2e.sops.yaml
+    path: nighthawk/e2e
     key: acme-web-ingest
   acme-web-query:
-    file: secrets/e2e.sops.yaml
+    path: nighthawk/e2e
     key: acme-web-query
   acme-batch-ingest:
-    file: secrets/e2e.sops.yaml
+    path: nighthawk/e2e
     key: acme-batch-ingest
   acme-batch-query:
-    file: secrets/e2e.sops.yaml
+    path: nighthawk/e2e
     key: acme-batch-query
   globex-web-ingest:
-    file: secrets/e2e.sops.yaml
+    path: nighthawk/e2e
     key: globex-web-ingest
   globex-web-query:
-    file: secrets/e2e.sops.yaml
+    path: nighthawk/e2e
     key: globex-web-query
   globex-edge-ingest:
-    file: secrets/e2e.sops.yaml
+    path: nighthawk/e2e
     key: globex-edge-ingest
   globex-edge-query:
-    file: secrets/e2e.sops.yaml
+    path: nighthawk/e2e
     key: globex-edge-query
 credentials:
 - id: acme-web-ingest
@@ -192,21 +190,22 @@ tenants:
   datastreams:
   - id: web
     backend_id: acme-web
+    # Each signal has its own retention, so the suite can tell them apart per backend.
     signals:
       metrics:
         retention: 168h
         ingestion_rate_samples_per_second: 10000
         query_concurrency: 4
       logs:
-        retention: 168h
+        retention: 240h
         ingestion_rate_bytes_per_second: 1048576
         query_concurrency: 4
       traces:
-        retention: 168h
+        retention: 120h
         ingestion_rate_bytes_per_second: 1048576
         query_concurrency: 4
       profiles:
-        retention: 168h
+        retention: 72h
         ingestion_rate_bytes_per_second: 1048576
         query_concurrency: 4
     collection:
@@ -216,6 +215,8 @@ tenants:
       - authorization
       - cookie
       - email
+      # Has a separator: arrives as the label `user_email` in the profile pipeline.
+      - user.email
       allow_privileged_profiling: false
   - id: batch
     backend_id: acme-batch

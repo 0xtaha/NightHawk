@@ -5,10 +5,11 @@
 `render-contracts` produces per-tenant runtime overrides for all four backends
 and a Grafana desired state. `provision-grafana` applies that state through
 Grafana's HTTP API. Both have been run on the Compose stack under rootless
-Podman: the backends load the overrides, Grafana 13.2.3 is provisioned, a
-second run reports no changes, and a provisioned data source returns data
-through the gateway. Deletion after the retention period has not been
-observed.
+Podman: Mimir, Tempo, and Pyroscope report the rendered overrides, Grafana
+13.2.3 is provisioned, a second run reports no changes, a provisioned data
+source returns data through the gateway, and every correlation link targets
+a data source of the same organization. Loki's loaded overrides cannot be
+read back, and deletion after the retention period has not been observed.
 
 ## Prerequisites
 
@@ -95,10 +96,24 @@ them.
 Limits the contract does not declare, such as burst sizes and series limits,
 stay at backend defaults.
 
-On the running Compose stack each backend was observed reporting the
-rendered values (Mimir and Pyroscope at `/runtime_config`, Tempo at
-`/status/overrides/<tenant>`), and Mimir picked up a changed value within
-its reload period without a restart.
+On the running Compose stack Mimir, Tempo, and Pyroscope were observed
+reporting the rendered retention for every datastream and signal (Mimir and
+Pyroscope at `/runtime_config`, Tempo at `/status/overrides/<tenant>`),
+including one datastream whose four signals each declare a different
+retention. Mimir picked up a changed value within its reload period without
+a restart.
+
+Loki was not observed this way: Loki 3.7.8 has no endpoint that lists loaded
+overrides. Its configuration loads the same rendered file, and tenant
+enforcement and ingestion were observed, but the retention value Loki holds
+for a tenant has not been read back.
+
+The provisioned correlation links were checked on the running Grafana: each
+`datasourceUid` in a data source's settings is a data source of the same
+organization, and a datastream's trace link points at that datastream's own
+trace data source. Whether each link is useful is a separate matter:
+`exemplarTraceIdDestinations` needs exemplars to be stored, and the service
+map needs a metrics generator; neither is configured or exercised.
 
 A rendered retention value is not proof of deletion. Deletion must be
 observed after each backend's processing window, including noncurrent object
@@ -135,7 +150,10 @@ would create data source example/application logs (nh-l-e70e1f20bd525b64db01db8a
 ...
 ```
 
-Remove `--dry-run` to apply. A second run prints `no changes`.
+Remove `--dry-run` to apply. A second run prints `no changes`, including
+one made straight after the first: Grafana makes the first data source
+created in an organization its default by itself, so a newly created data
+source is read back and corrected in the same run.
 
 - `--dry-run` sends only read requests and needs no materialized secrets.
 - `--prune` deletes NightHawk data sources (UID prefix `nh-`) that are no
@@ -145,8 +163,16 @@ Remove `--dry-run` to apply. A second run prints `no changes`.
   is listed as undeclared.
 - `--update-secrets` resends every data source password. Grafana does not
   return stored passwords, so a password changed with `rotate-secret` under
-  the same credential ID is not detected otherwise. Rotating by declaring a
-  new credential ID changes the user name and is detected.
+  the same credential ID is not detected otherwise. The Docker quickstart
+  passes it when a query credential's value changed since its previous run,
+  and not otherwise, so an unchanged re-run still prints `no changes`.
+- `--credential <id>` names the query credential to use for a datastream that
+  declares more than one, as during a
+  [rotation](05-gateway.md#rotate-a-gateway-credential-without-a-gap). Repeat
+  it per datastream. Without it such a datastream is an error that lists the
+  candidates, before Grafana is contacted; no credential is chosen by ID
+  order. Rotating this way changes the data sources' user name, which is
+  detected without `--update-secrets`.
 
 ### Verified Grafana API
 

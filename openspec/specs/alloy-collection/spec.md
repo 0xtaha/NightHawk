@@ -99,9 +99,12 @@ than unbounded growth.
 A rendered collector SHALL remove every field named in its datastream's
 drop-field list from metric labels, log labels and structured metadata, OTLP
 span, log, and metric attributes, OTLP resource attributes, and profile
-labels, matching field names case-insensitively, before delivery. The
-documentation SHALL state which content is not sanitized, including free-text
-log bodies beyond the documented key/value patterns and profile payloads.
+labels, matching field names case-insensitively, before delivery. In
+pipelines whose label names cannot contain `.` or `-`, the collector SHALL
+also remove the label whose name is the drop field with those characters
+replaced by `_`. The documentation SHALL state which content is not
+sanitized, including free-text log bodies beyond the documented key/value
+patterns and profile payloads.
 
 #### Scenario: Drop-field coverage in every enabled pipeline
 - **WHEN** a collector is rendered for a datastream with drop fields
@@ -113,6 +116,12 @@ log bodies beyond the documented key/value patterns and profile payloads.
 - **WHEN** any profile is rendered
 - **THEN** no path from a receiver or discovery component to a gateway
   exporter bypasses that signal's redaction stage
+
+#### Scenario: Drop field with a separator in a label pipeline
+- **WHEN** a collector is rendered for a datastream with drop field
+  `user.email`
+- **THEN** the metric, log, and profile label rules remove both `user.email`
+  and `user_email`, and the attribute rules remove `user.email`
 
 ### Requirement: Privileged profiling is separate and opt-in
 Privileged or eBPF-based profiling SHALL be delivered as a separate collector
@@ -144,3 +153,19 @@ signal backends', gateway's, and auth service's operational metrics.
 - **WHEN** the Docker profile is rendered without the self-monitoring option
 - **THEN** the output contains no scrape of backend, gateway, or auth-service
   metrics
+
+### Requirement: OTLP-only collector
+The collector render SHALL support an option that omits a profile's host
+sources and produces a collector that only receives pushed telemetry and
+scrapes itself, with the same redaction and delivery as any other collector.
+
+#### Scenario: Rendering without host sources
+- **WHEN** a collector is rendered with the OTLP-only option
+- **THEN** the output contains no host discovery or host scraping component,
+  needs no runtime socket or host mount, and still contains the redaction and
+  delivery pipelines for every enabled signal
+
+#### Scenario: Pushed profiles are still accepted
+- **WHEN** an OTLP-only collector is rendered for a datastream that enables
+  profiles
+- **THEN** it accepts pushed profiles and forwards them through redaction

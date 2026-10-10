@@ -1,11 +1,14 @@
 # Quickstart: the whole platform on one machine
 
-One command generates local secrets and certificates, renders every
-configuration file from `config/tenants.example.yaml`, starts the Docker
-Compose stack, and provisions Grafana.
+Three commands: start a development Vault, configure it, and run the
+quickstart. The quickstart generates secrets into that Vault, obtains
+certificates from it, renders every configuration file from
+`config/tenants.example.yaml`, starts the Docker Compose stack, and provisions
+Grafana.
 
-This is a development setup: single node, not highly available, with a
-locally generated certificate authority. The example document's retention
+This is a development setup: single node, not highly available, with secrets
+and the certificate authority in a throwaway dev-mode Vault that forgets
+everything when it stops. The example document's retention
 values are examples, not production defaults. It has been run under rootless
 Podman only; see [what was verified](07-docker-compose.md#observed-results).
 
@@ -17,20 +20,10 @@ Podman only; see [what was verified](07-docker-compose.md#observed-results).
   ([configuration](02-configuration.md#prerequisites)).
 - A container runtime with the Docker Compose CLI: Docker Engine, or rootless
   Podman with its API socket.
-- Network access on the first run to pull the nine pinned images and build
-  the NightHawk image. Nothing is pulled afterwards.
-- Port 8443 free on the loopback address.
-- `sops` 3.13.3 and `age` 1.3.2. To download both into the ignored `.tools/`
-  directory, checked against the checksums in `config/versions.yaml`:
-
-  ```console
-  $ python -m nighthawk fetch-tools
-  Installed sops, age into /path/to/NightHawk/.tools
-  ```
-
-  The quickstart looks in `.tools/` first. `sops` checksums come from its
-  release's checksum file; `age` publishes none, so its checksums were
-  computed from the release archives when the pin was made.
+- Network access on the first run to pull the nine pinned images and the
+  Vault image, and to build the NightHawk image. Nothing is pulled afterwards.
+- Ports 8443 and 8200 free on the loopback address.
+- `openssl`, to generate the development Vault's token.
 
 ### Rootless Podman
 
@@ -46,31 +39,72 @@ rootless Podman the services run as container root, which is your own
 unprivileged user outside the container
 ([details](07-docker-compose.md#podman-differences)).
 
+## Start a development Vault
+
+The platform keeps its secrets in a HashiCorp Vault that you provide, and gets
+its certificates from that Vault's PKI engine. For this quickstart, run one in
+dev mode from the image pinned in `config/versions.yaml`:
+
+```console
+$ mkdir -p .generated && (umask 077; openssl rand -hex 16 > .generated/vault-token)
+$ docker run --detach --name nighthawk-vault --cap-add IPC_LOCK \
+    --publish 127.0.0.1:8200:8200 \
+    --env VAULT_DEV_ROOT_TOKEN_ID="$(cat .generated/vault-token)" \
+    --env VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200 \
+    docker.io/hashicorp/vault@sha256:c2f666266f383d2cf424d86b8bb8ce7d065562173ffec2b476d762943608bb55 server -dev
+```
+
+Then give it the mounts, certificate authority, roles, and policy the
+platform needs:
+
+```console
+$ python -m nighthawk bootstrap-dev-vault --vault-token-file .generated/vault-token \
+    --config config/tenants.example.yaml --confirm-disposable-vault --ca-valid-days 365
+Configured the development Vault: mount nighthawk-kv, mount nighthawk-pki, certificate authority, PKI role nighthawk-server, PKI role nighthawk-collector, policy nighthawk
+```
+
+The token is that container's root token. It is stored only in
+`.generated/vault-token`, which Git ignores and only you can read; the
+quickstart never copies it anywhere. See
+[development Vault](02-configuration.md#development-vault) for what the
+bootstrap does, and [what the platform needs from
+Vault](02-configuration.md#what-the-platform-needs-from-vault) to use your
+own Vault instead.
+
+A dev-mode Vault keeps everything in memory. **When that container stops,
+every secret and the certificate authority are gone**; see
+[if the Vault is recreated](#if-the-vault-is-recreated).
+
 ## Start
 
 ```console
-$ python -m nighthawk quickstart-docker
+$ python -m nighthawk quickstart-docker --vault-token-file .generated/vault-token
 Grafana admin password (shown once): <generated>
 NightHawk is running.
   Gateway:  https://gateway.nighthawk.internal:8443  (published on 127.0.0.1:8443)
   Grafana:  https://grafana.nighthawk.internal:8443  (user admin)
   Collector datastream: example/application
   Retention values in the platform document are examples, not production defaults.
-  Created this run: age key, credential example-ingest, ...
+  Created this run: credential example-ingest, credential example-query, ...
 ```
 
-Before it writes anything, it checks the Compose command, the runtime,
-`sops`, `age`, and the port, and lists everything that is missing.
+`VAULT_TOKEN` in the environment works in place of `--vault-token-file`.
+
+Before it writes anything, it checks the Compose command, the runtime, Vault
+(reachable, unsealed, a supported version, the credential accepted, the
+declared mounts and roles present and covering the declared names), and the
+port, and lists everything that is missing.
 
 What it creates, only when missing and never replacing:
 
-- An age key at `secrets/local.agekey` and the encrypted
-  `secrets/local.sops.yaml`. Both are ignored by Git.
-- A secret for every credential, an S3 identity per backend, the Grafana
-  admin password, a local certificate authority, and certificates for the
-  gateway, object storage, and the collector.
+- In Vault: a secret for every credential, an S3 identity per backend, and
+  the Grafana admin password.
+- From Vault's certificate authority: certificates for the gateway, object
+  storage, and the collector. Their private keys are generated on this
+  machine and never sent to Vault.
 - `.generated/docker/` (rendered configuration) and `.materialized-secrets/`
-  (decrypted secrets, owner-only). Both are ignored by Git.
+  (secrets read from Vault and the certificates, owner-only). Both are
+  ignored by Git.
 
 The Grafana admin password is printed once, when it is created. To read it
 again:
@@ -85,6 +119,14 @@ the same state. Use `--no-build` to skip rebuilding the NightHawk image.
 `--compose` or `NIGHTHAWK_COMPOSE` selects another Compose command; only
 `docker compose` has been tried.
 
+The gateway is published on `127.0.0.1` only, on the port the network
+contract declares for the `local-gateway` entry point (8443). `--bind-address`
+accepts another loopback address such as `::1` and refuses anything else:
+that entry point is scoped `loopback` in the gateway policy and accepts
+ingestion without a client certificate, so it must not be reachable from
+another machine. Publishing for other machines is not supported by the
+quickstart.
+
 ## Reach it
 
 The two host names are not in DNS. Add them to `/etc/hosts`:
@@ -94,7 +136,8 @@ The two host names are not in DNS. Add them to `/etc/hosts`:
 ```
 
 Then open `https://grafana.nighthawk.internal:8443` and log in as `admin`.
-Your browser will not trust the local CA; its certificate is at
+Your browser will not trust the development Vault's certificate authority;
+its certificate is at
 `.materialized-secrets/runtime/grafana/gateway-ca.pem`. The `example`
 organization has one data source per signal for the `application`
 datastream.
@@ -124,7 +167,7 @@ the gateway with the datastream's query credential:
 ```console
 $ curl --cacert .materialized-secrets/runtime/grafana/gateway-ca.pem \
     --resolve gateway.nighthawk.internal:8443:127.0.0.1 \
-    --user "example-query:$(cat .materialized-secrets/secrets/local.sops.yaml/example-query)" \
+    --user "example-query:$(cat .materialized-secrets/kv/nighthawk/local/example-query)" \
     --get --data-urlencode 'query=nighthawk_fixture_value{run_id="demo1"}' \
     https://gateway.nighthawk.internal:8443/metrics/prometheus/api/v1/query
 ```
@@ -155,8 +198,9 @@ Stopped and removed the NightHawk containers and networks.
 Volumes, secrets, and certificates were kept.
 ```
 
-Telemetry, Grafana state, secrets, and certificates survive. Start again with
-the quickstart and earlier data is still there.
+Telemetry, Grafana state, and certificates survive, and so do the secrets as
+long as the Vault container keeps running. Start again with the quickstart and
+earlier data is still there.
 
 To delete everything stored, including all telemetry:
 
@@ -165,34 +209,59 @@ $ python -m nighthawk teardown-docker --purge --yes
 ```
 
 Without `--yes` it asks for confirmation, and refuses when it cannot ask.
-Purging removes the volumes only. To also discard the generated secrets, run
-`python -m nighthawk clean-secrets` and delete `secrets/local.sops.yaml` and
-`secrets/local.agekey`; the next quickstart then generates new ones, which
-requires a purge first because stored data is tied to the old storage keys.
+Purging removes the volumes only. To discard everything else as well:
+
+```console
+$ python -m nighthawk clean-secrets
+$ docker rm --force nighthawk-vault
+$ rm .generated/vault-token
+```
+
+### If the Vault is recreated
+
+Stored telemetry is protected by the storage identities in Vault. If the
+development Vault restarts, those identities are gone while the volumes are
+still there. The quickstart then stops before generating anything:
+
+```text
+error: Vault holds no value for the storage identities (loki-storage, mimir-storage, pyroscope-storage, tempo-storage) that protect the data in existing volumes (...). A development Vault loses everything when it restarts. Clear the volumes with `python -m nighthawk teardown-docker --purge --yes`, then run the quickstart again.
+```
+
+Start and bootstrap the Vault again, purge as the message says, and run the
+quickstart. The new Vault has a new certificate authority, so the quickstart
+issues its certificates again and says so.
 
 ## Startup time and memory
 
-No startup target is claimed. Measured on 2026-10-09 and 2026-10-10 on
-Fedora 43 with rootless Podman 5.8.4 and Docker Compose 5.3.1, 4 CPUs and
-16 GB RAM, with all images already present and the NightHawk image already
-built (`--no-build`). Times are from the command to its last line and
-include secret decryption, rendering, start-up, and Grafana provisioning.
+No startup target is claimed. Measured on 2026-10-10 on Fedora 43 with
+rootless Podman 5.8.4 and Docker Compose 5.3.1, 4 CPUs and 16 GB RAM, with
+all images already present, the NightHawk image already built (`--no-build`),
+and a bootstrapped dev-mode Vault 2.1.2 already running. Times are from the
+quickstart command to its last line and include reading secrets from Vault,
+rendering, start-up, and Grafana provisioning. One run each.
 
-| Start | Runs | Time |
-| --- | --- | --- |
-| Cold: volumes purged, secrets and certificates kept | 3 | 100 s, 95 s, 102 s |
-| Warm: after `teardown-docker`, volumes kept | 3 | 95 s, 93 s, 97 s |
-| Re-run while the stack is already up | 1 | 17 s |
+| Start | Time |
+| --- | --- |
+| First run: empty Vault, no volumes; generates every secret and certificate | 101 s |
+| Cold: volumes purged, secrets and certificates kept | 94 s |
+| Warm: after `teardown-docker`, volumes kept | 99 s |
+| Re-run while the stack is already up | 17 s |
 
-Warm is barely faster than cold because most of the time is fixed waits, not
-work: Mimir and Pyroscope each hold readiness back for a set period after
-starting, and the stack starts in dependency order behind them. A first run
-that also pulls images, builds the NightHawk image, and generates secrets
-was not timed; on this machine's connection the pulls alone took over ten
-minutes.
+These match what was measured on 2026-10-09 with file-based secrets (cold 95
+to 102 s, warm 93 to 97 s, re-run 17 s): reading secrets from a local Vault
+and having three certificates signed adds no visible time. All four differ by
+less than the spread seen between runs then, because most of the time is
+fixed waits, not work: Mimir and Pyroscope each hold readiness back for a set
+period after starting, and the stack starts in dependency order behind them.
+
+Not included: starting the Vault container and `bootstrap-dev-vault`, which
+took a few seconds with the image present, and a first run that also pulls
+images and builds the NightHawk image. On this machine's connection the
+pulls alone took over ten minutes.
 
 Memory in use a few minutes after start, with the sample workload running
-and little load. This is idle usage, not a peak under load.
+and little load, measured on 2026-10-09 and not repeated. This is idle usage,
+not a peak under load. The dev-mode Vault container is not in the table.
 
 | Service | Memory | Limit |
 | --- | --- | --- |
@@ -212,8 +281,20 @@ values.
 
 ## Troubleshooting
 
-- `prerequisites not met`: each line names one missing item. For `sops` or
-  `age`, run `python -m nighthawk fetch-tools`.
+- `prerequisites not met`: each line names one missing item. A line about
+  Vault means it is not running, not bootstrapped, or no credential was
+  supplied; go back to [start a development Vault](#start-a-development-vault).
+- `does not allow <name>; apply the rendered vault/pki-roles.json`: the
+  platform document declares a hostname or collector identity that the role
+  in Vault does not cover. Run `bootstrap-dev-vault` again.
+- `requested validity outlives the certificate authority`: the authority was
+  created with a shorter `--ca-valid-days` than `--certificate-valid-days`.
+- `--bind-address ... is not a loopback address`: the quickstart publishes
+  only on loopback; see [start](#start).
+- `several ingestion credentials qualify` or `several query credentials are
+  declared`: the datastream has two credentials of one permission. Name the
+  one to use with `--credential`; see
+  [rotation](05-gateway.md#rotate-a-gateway-credential-without-a-gap).
 - `port 127.0.0.1:8443 is already in use`: another process holds the port.
   The check is skipped when the port is held by this stack.
 - `starting the stack failed ... not healthy: <service>`: read that

@@ -42,6 +42,31 @@ run "plans_with_the_real_network_contract_rule" {
   }
 
   assert {
+    condition = (
+      alltrue([for subnet in aws_subnet.public : subnet.tags["kubernetes.io/role/elb"] == "1"])
+      && alltrue([for subnet in aws_subnet.public : !contains(keys(subnet.tags), "kubernetes.io/role/internal-elb")])
+    )
+    error_message = "Public subnets must carry the public load balancer role tag only."
+  }
+
+  assert {
+    condition = (
+      alltrue([for subnet in aws_subnet.private : subnet.tags["kubernetes.io/role/internal-elb"] == "1"])
+      && alltrue([for subnet in aws_subnet.private : !contains(keys(subnet.tags), "kubernetes.io/role/elb")])
+    )
+    error_message = "Private subnets must carry the internal load balancer role tag only."
+  }
+
+  assert {
+    condition = (
+      one(values(aws_vpc_security_group_egress_rule.s3)).from_port == 443
+      && one(values(aws_vpc_security_group_egress_rule.s3)).ip_protocol == "tcp"
+      && one(values(aws_vpc_security_group_egress_rule.s3)).description == "aws-object-storage"
+    )
+    error_message = "The egress rule must carry the contract rule's protocol, port, and ID."
+  }
+
+  assert {
     condition     = contains(keys(aws_security_group.workload), "signal-backend")
     error_message = "Expected a security group for the signal-backend source identity."
   }

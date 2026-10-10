@@ -58,6 +58,9 @@ class FakeGrafana:
     def _save(self, store: dict, body: dict):
         public = {key: value for key, value in body.items() if key != "secureJsonData"}
         public["secureJsonFields"] = {"basicAuthPassword": True}
+        if not store and body["uid"] not in store:
+            # Like Grafana 13.2.3: the first data source created in an organization becomes its default.
+            public["isDefault"] = True
         store[body["uid"]] = public
         self.passwords[body["uid"]] = body["secureJsonData"]["basicAuthPassword"]
         return 200, {"message": "ok"}
@@ -157,6 +160,120 @@ class DesiredStateTests(GrafanaFixture):
             if item["uid"] == datasource_uid("example-application", "traces")
         )
         self.assertNotIn("tracesToProfiles", traces["jsonData"])
+
+
+class QueryCredentialChoiceTests(GrafanaFixture):
+    """A datastream with overlapping query credentials, as during a rotation."""
+
+    def overlap(self) -> None:
+        self.data["secrets"]["example-query-2"] = {"path": "nighthawk/local", "key": "example-query-2"}
+        self.data["credentials"].append({
+            "id": "example-query-2", "secret_ref": "example-query-2",
+            "tenant": "example", "datastream": "application", "permission": "query",
+        })
+
+    def users(self, *credentials: str) -> dict[str, set[str]]:
+        state = desired_state(self.platform(), credentials)
+        users: dict[str, set[str]] = {}
+        for organization in state["organizations"]:
+            for source in organization["datasources"]:
+                users.setdefault(source["name"].split()[0], set()).add(source["basicAuthUser"])
+        return users
+
+    def test_single_query_credential_needs_no_choice(self) -> None:
+        self.assertEqual(self.users()["application"], {"example-query", "second-application-query"})
+
+    def test_overlap_with_a_named_credential_uses_it_for_every_data_source_of_that_datastream(self) -> None:
+        self.overlap()
+        for chosen in ("example-query-2", "example-query"):
+            with self.subTest(chosen=chosen):
+                state = desired_state(self.platform(), [chosen])
+                sources = [
+                    source for source in state["organizations"][0]["datasources"]
+                    if source["name"].startswith("application ")
+                ]
+                self.assertEqual(len(sources), 4)
+                self.assertEqual({source["basicAuthUser"] for source in sources}, {chosen})
+                self.assertEqual({source["secret_ref"] for source in sources}, {chosen})
+        # Other datastreams are untouched by the choice.
+        self.assertEqual(self.users("example-query-2")["infrastructure"], {"example-infrastructure-query"})
+
+    def test_applying_the_named_credential_updates_the_data_sources(self) -> None:
+        self.overlap()
+        fake, read = FakeGrafana(), lambda secret_ref: secret_for(secret_ref)
+        reconcile(desired_state(self.platform(), ["example-query"]), fake, read)
+        changes = reconcile(desired_state(self.platform(), ["example-query-2"]), fake, read)
+        self.assertEqual(len([line for line in changes.lines(False) if "update" in line.lower()]), 4)
+
+    def test_overlap_without_a_named_credential_lists_the_datastream_and_candidates(self) -> None:
+        self.overlap()
+        with self.assertRaisesRegex(
+            ConfigurationError,
+            "example/application: several query credentials are declared \\(example-query, example-query-2\\); "
+            "choose one explicitly with --credential",
+        ):
+            desired_state(self.platform())
+
+    def test_named_credential_must_be_a_declared_query_credential(self) -> None:
+        for name in ("missing", "example-ingest"):
+            with self.subTest(name=name), self.assertRaisesRegex(ConfigurationError, f"'{name}' is not a query credential of any datastream"):
+                desired_state(self.platform(), [name])
+
+    def test_two_names_for_one_datastream_are_refused(self) -> None:
+        self.overlap()
+        with self.assertRaisesRegex(ConfigurationError, "both example-query and example-query-2 were named; choose one"):
+            desired_state(self.platform(), ["example-query", "example-query-2"])
+
+    def test_cli_fails_before_contacting_grafana_and_accepts_the_option(self) -> None:
+        self.overlap()
+        password = self.root / "admin-password"
+        password.write_text("admin-secret-value\n", encoding="utf-8")
+        fake = FakeGrafana()
+        arguments = [
+            "provision-grafana", "--config", str(write_document(self.root, self.data)),
+            "--url", "http://grafana.invalid", "--admin-user", "admin",
+            "--admin-password-file", str(password), "--dry-run",
+        ]
+        errors = io.StringIO()
+        with mock.patch("nighthawk.__main__.grafana.http_client", return_value=fake), redirect_stderr(errors):
+            self.assertEqual(main(arguments), 1)
+        self.assertIn("several query credentials are declared", errors.getvalue())
+        self.assertEqual(fake.calls, [])
+        with mock.patch("nighthawk.__main__.grafana.http_client", return_value=fake), redirect_stdout(io.StringIO()):
+            self.assertEqual(main([*arguments, "--credential", "example-query-2"]), 0)
+
+    def test_render_contracts_takes_the_same_choice(self) -> None:
+        self.overlap()
+        config = str(write_document(self.root, self.data))
+        with redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(main(["render-contracts", "--config", config, "--output", str(self.root / "a")]), 1)
+        self.assertIn("several query credentials are declared", errors.getvalue())
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(main([
+                "render-contracts", "--config", config, "--output", str(self.root / "b"), "--credential", "example-query-2",
+            ]), 0)
+        state = json.loads((self.root / "b" / "grafana" / "desired-state.json").read_text())
+        self.assertIn("example-query-2", json.dumps(state))
+
+
+class FirstApplyTests(GrafanaFixture):
+    def test_first_data_source_of_an_organization_is_not_left_as_grafanas_default(self) -> None:
+        fake, read = FakeGrafana(), lambda secret_ref: secret_for(secret_ref)
+        first = reconcile(self.state(), fake, read)
+        self.assertEqual(len(first.created), 2 + 10)
+        self.assertEqual(first.updated, [])
+        for org, store in fake.datasources.items():
+            self.assertEqual([uid for uid, item in store.items() if item["isDefault"]], [], org)
+        # One corrective write per new organization, for the data source Grafana made default.
+        self.assertEqual(len([call for call in fake.calls if call[0] == "PUT"]), 2)
+
+    def test_apply_straight_after_the_first_one_changes_nothing(self) -> None:
+        fake, read = FakeGrafana(), lambda secret_ref: secret_for(secret_ref)
+        reconcile(self.state(), fake, read)
+        fake.calls.clear()
+        second = reconcile(self.state(), fake, read)
+        self.assertEqual(second.lines(False), ["no changes"])
+        self.assertEqual(fake.modifying_calls(), [])
 
 
 class ReconcileTests(GrafanaFixture):

@@ -13,7 +13,7 @@
     "collectors",
     "container_images",
     "validation_tools",
-    "secrets_tools",
+    "secrets_store",
     "os_support",
     "tracked_consumers"
   ],
@@ -120,6 +120,7 @@
             "app_version": { "$ref": "#/$defs/app_version" },
             "source": { "$ref": "#/$defs/source" },
             "runtime_verified": { "type": "boolean" },
+            "app_version_exception": { "$ref": "#/$defs/app_version_exception" },
             "release_channel": { "type": "string", "enum": ["stable", "weekly"] }
           }
         },
@@ -178,13 +179,31 @@
         }
       }
     },
-    "secrets_tools": {
+    "secrets_store": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sops", "age"],
+      "required": ["vault"],
       "properties": {
-        "sops": { "$ref": "#/$defs/tool_pin" },
-        "age": { "$ref": "#/$defs/tool_pin" }
+        "vault": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "source", "runtime_verified", "supported", "image"],
+          "properties": {
+            "version": { "$ref": "#/$defs/release" },
+            "source": { "$ref": "#/$defs/source" },
+            "runtime_verified": { "type": "boolean" },
+            "supported": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["minimum", "below"],
+              "properties": {
+                "minimum": { "$ref": "#/$defs/release" },
+                "below": { "$ref": "#/$defs/release" }
+              }
+            },
+            "image": { "$ref": "#/$defs/image" }
+          }
+        }
       }
     },
     "os_support": {
@@ -211,6 +230,18 @@
     }
   },
   "$defs": {
+    "app_version_exception": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason"],
+      "properties": {
+        "reason": { "type": "string", "minLength": 20 }
+      }
+    },
+    "release": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
     "version": {
       "type": "string",
       "pattern": "^v?[0-9]+(\\.[0-9]+){0,3}([+-][A-Za-z0-9.]+)*$"
@@ -234,21 +265,6 @@
         "runtime_verified": { "type": "boolean" }
       }
     },
-    "tool_pin": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["version", "source", "runtime_verified", "sha256"],
-      "properties": {
-        "version": { "$ref": "#/$defs/version" },
-        "source": { "$ref": "#/$defs/source" },
-        "runtime_verified": { "type": "boolean" },
-        "sha256": {
-          "type": "object",
-          "minProperties": 1,
-          "additionalProperties": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
-        }
-      }
-    },
     "image": {
       "type": "object",
       "additionalProperties": false,
@@ -267,7 +283,8 @@
         "version": { "$ref": "#/$defs/version" },
         "app_version": { "$ref": "#/$defs/app_version" },
         "source": { "$ref": "#/$defs/source" },
-        "runtime_verified": { "type": "boolean" }
+        "runtime_verified": { "type": "boolean" },
+        "app_version_exception": { "$ref": "#/$defs/app_version_exception" }
       }
     },
     "os_target": {

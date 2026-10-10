@@ -8,6 +8,7 @@ here, so telemetry cannot reach the gateway without passing redaction.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -57,6 +58,16 @@ def _alternation(fields: tuple[str, ...]) -> str:
     return "|".join(field.replace(".", "[.]") for field in fields)
 
 
+def _label_alternation(fields: tuple[str, ...]) -> str:
+    """Drop fields as label names. A label cannot hold "." or "-", so `user.email` arrives as `user_email`."""
+    names: list[str] = []
+    for field in fields:
+        for name in (field, re.sub(r"[.-]", "_", field)):
+            if name not in names:
+                names.append(name)
+    return _alternation(tuple(names))
+
+
 def _case_variants(fields: tuple[str, ...]) -> list[str]:
     return sorted({variant for field in fields for variant in (field, field.lower(), field.upper(), field.title())})
 
@@ -103,7 +114,7 @@ def _basic_auth(credential: Credential, indent: str) -> str:
     )
 
 
-def _metrics(base: str, credential: Credential, pattern: str, with_certificate: bool, monitored: list[tuple[str, str]]) -> str:
+def _metrics(base: str, credential: Credential, label_pattern: str, with_certificate: bool, monitored: list[tuple[str, str]]) -> str:
     platform_scrape = ""
     if monitored:
         targets = "".join(
@@ -132,7 +143,7 @@ prometheus.relabel "redact" {{
 
   rule {{
     action = "labeldrop"
-    regex  = "(?i)({pattern})"
+    regex  = "(?i)({label_pattern})"
   }}
 }}
 
@@ -164,7 +175,9 @@ prometheus.remote_write "gateway" {{
 """
 
 
-def _logs(base: str, credential: Credential, fields: tuple[str, ...], pattern: str, with_certificate: bool) -> str:
+def _logs(
+    base: str, credential: Credential, fields: tuple[str, ...], pattern: str, label_pattern: str, with_certificate: bool,
+) -> str:
     variants = ", ".join(_quote(item) for item in _case_variants(fields))
     return f"""
 // ---- logs ----
@@ -173,7 +186,7 @@ loki.relabel "redact" {{
 
   rule {{
     action = "labeldrop"
-    regex  = "(?i)({pattern})"
+    regex  = "(?i)({label_pattern})"
   }}
 }}
 
@@ -323,7 +336,7 @@ otelcol.exporter.otlphttp "gateway" {{
 """
 
 
-def _profiles(base: str, credential: Credential, pattern: str, with_certificate: bool, sdk: bool) -> str:
+def _profiles(base: str, credential: Credential, label_pattern: str, with_certificate: bool, sdk: bool) -> str:
     receiver = """
 // Applications push profiles here with a Pyroscope SDK.
 pyroscope.receive_http "sdk" {
@@ -341,7 +354,7 @@ pyroscope.relabel "redact" {{
 
   rule {{
     action = "labeldrop"
-    regex  = "(?i)({pattern})"
+    regex  = "(?i)({label_pattern})"
   }}
 }}
 
@@ -413,6 +426,7 @@ def render_collector(
     credential = _select_credential(platform, stream, profile, credential_id)
     with_certificate = credential.certificate_identity is not None
     pattern = _alternation(stream.drop_fields)
+    label_pattern = _label_alternation(stream.drop_fields)
 
     files: dict[str, str] = {}
     # OTLP-only: no host discovery or scraping, so no runtime socket, host mount, or privilege.
@@ -427,15 +441,15 @@ def render_collector(
     )
     if "metrics" in signals:
         generated += _metrics(
-            base, credential, pattern, with_certificate, _monitored_targets(platform) if self_monitoring else [],
+            base, credential, label_pattern, with_certificate, _monitored_targets(platform) if self_monitoring else [],
         )
     if "logs" in signals:
-        generated += _logs(base, credential, stream.drop_fields, pattern, with_certificate)
+        generated += _logs(base, credential, stream.drop_fields, pattern, label_pattern, with_certificate)
     otlp = [signal for signal in OTLP_SIGNALS if signal in signals]
     if otlp:
         generated += _otlp(base, credential, otlp, pattern, with_certificate)
     if "profiles" in signals:
-        generated += _profiles(base, credential, pattern, with_certificate, profile.sdk_profiles)
+        generated += _profiles(base, credential, label_pattern, with_certificate, profile.sdk_profiles)
     # `alloy fmt` indents with tabs; emit the same so the generated file is format-clean.
     files["datastream.alloy"] = "".join(
         "\t" * ((len(line) - len(line.lstrip(" "))) // 2) + line.lstrip(" ")

@@ -1,13 +1,19 @@
 # Contract example, not deployment configuration. Retention values are examples.
-schema_version: 1
+schema_version: 2
 deployment: docker
 profile: development
+vault:
+  # A dev-mode Vault on this machine; see docs/00-quickstart.md. Credentials are never declared here.
+  address: http://127.0.0.1:8200
+  kv_mount: nighthawk-kv
+  pki:
+    mount: nighthawk-pki
+    server_role: nighthawk-server
+    client_role: nighthawk-collector
 gateway:
   hostname: gateway.nighthawk.internal
   entry_points: [local-gateway, grafana-gateway]
   grafana_entry_point: grafana-gateway
-  client_ca_secret_ref: gateway-client-ca
-  client_ca_key_secret_ref: gateway-client-ca-key
   auth_service: http://authz:9180
   upstreams:
     grafana: http://grafana:3000
@@ -33,7 +39,8 @@ storage:
       force_path_style: true
       tls:
         enabled: true
-        ca_secret_ref: storage-ca
+        trust: pki
+        ca_secret_ref: null
       identity:
         type: secret
         ref: mimir-storage
@@ -66,16 +73,13 @@ storage:
         type: secret
         ref: pyroscope-storage
 secrets:
-  storage-ca: {file: secrets/local.sops.yaml, key: storage-ca}
-  mimir-storage: {file: secrets/local.sops.yaml, key: mimir-storage}
-  loki-storage: {file: secrets/local.sops.yaml, key: loki-storage}
-  tempo-storage: {file: secrets/local.sops.yaml, key: tempo-storage}
-  pyroscope-storage: {file: secrets/local.sops.yaml, key: pyroscope-storage}
-  gateway-client-ca: {file: secrets/local.sops.yaml, key: gateway-client-ca}
-  gateway-client-ca-key: {file: secrets/local.sops.yaml, key: gateway-client-ca-key}
-  grafana-admin: {file: secrets/local.sops.yaml, key: grafana-admin}
-  example-ingest: {file: secrets/local.sops.yaml, key: example-ingest}
-  example-query: {file: secrets/local.sops.yaml, key: example-query}
+  mimir-storage: {path: nighthawk/local, key: mimir-storage}
+  loki-storage: {path: nighthawk/local, key: loki-storage}
+  tempo-storage: {path: nighthawk/local, key: tempo-storage}
+  pyroscope-storage: {path: nighthawk/local, key: pyroscope-storage}
+  grafana-admin: {path: nighthawk/local, key: grafana-admin}
+  example-ingest: {path: nighthawk/local, key: example-ingest}
+  example-query: {path: nighthawk/local, key: example-query}
 credentials:
   - id: example-ingest
     secret_ref: example-ingest

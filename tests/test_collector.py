@@ -170,10 +170,12 @@ class RenderCollectorTests(unittest.TestCase):
         self.stream["collection"]["drop_fields"] = ["password", "user.email"]
         text = self.render()["datastream.alloy"]
         alternation = "password|user[.]email"
+        # Label pipelines also match the sanitized spelling: a label cannot hold "." or "-".
+        labels = "password|user[.]email|user_email"
         for header in ('prometheus.relabel "redact"', 'loki.relabel "redact"', 'pyroscope.relabel "redact"'):
             body = block(text, header)
             self.assertIn('action = "labeldrop"', body)
-            self.assertIn(f'regex  = "(?i)({alternation})"', body)
+            self.assertIn(f'regex  = "(?i)({labels})"', body)
         process = block(text, 'loki.process "redact"')
         self.assertIn('"PASSWORD", "Password", "USER.EMAIL", "User.Email", "password", "user.email"', process)
         self.assertEqual(process.count(alternation), 2)
@@ -185,6 +187,28 @@ class RenderCollectorTests(unittest.TestCase):
             self.assertIn(f'delete_matching_keys({context}.attributes, "(?i)^({alternation})$")', transform)
         self.assertEqual(transform.count("delete_matching_keys(resource.attributes"), 3)
         self.assertIn("replace_pattern(log.body", transform)
+
+    def test_label_pipelines_drop_the_sanitized_form_of_a_separated_field(self) -> None:
+        self.stream["collection"]["drop_fields"] = ["user.email", "api-key", "token"]
+        text = self.render()["datastream.alloy"]
+        for header in ('prometheus.relabel "redact"', 'loki.relabel "redact"', 'pyroscope.relabel "redact"'):
+            (expression,) = re.findall(r'regex  = "(.*)"', block(text, header))
+            # Relabel expressions are anchored at both ends; Go accepts the leading flag group as written.
+            self.assertTrue(expression.startswith("(?i)"))
+            dropped = re.compile(f"^(?:{expression.removeprefix('(?i)')})$", re.IGNORECASE)
+            for label in ("user.email", "user_email", "USER_EMAIL", "api-key", "api_key", "Api_Key", "token"):
+                self.assertTrue(dropped.match(label), (header, label))
+            for label in ("user_emails", "my_user_email", "userXemail", "apikey", "service_name", "job"):
+                self.assertFalse(dropped.match(label), (header, label))
+        # Attributes keep their original names, so the attribute rules are unchanged.
+        transform = block(text, 'otelcol.processor.transform "redact"')
+        self.assertIn('delete_matching_keys(span.attributes, "(?i)^(api-key|token|user[.]email)$")', transform)
+        self.assertNotIn("user_email", transform)
+
+    def test_field_without_a_separator_is_not_listed_twice(self) -> None:
+        self.stream["collection"]["drop_fields"] = ["password", "user_email"]
+        text = self.render()["datastream.alloy"]
+        self.assertIn('regex  = "(?i)(password|user_email)"', block(text, 'prometheus.relabel "redact"'))
 
     def test_exporters_are_reachable_only_through_redaction(self) -> None:
         for profile in BASE_PROFILES:
@@ -220,7 +244,7 @@ class RenderCollectorTests(unittest.TestCase):
     def test_ambiguous_choices_must_be_made_explicitly(self) -> None:
         with self.assertRaisesRegex(ConfigurationError, "several gateway entry points"):
             self.render(entry_point=None)
-        self.data["secrets"]["example-ingest-next"] = {"file": "secrets/local.sops.yaml", "key": "example-ingest-next"}
+        self.data["secrets"]["example-ingest-next"] = {"path": "nighthawk/local", "key": "example-ingest-next"}
         self.data["credentials"].append({
             "id": "example-ingest-next", "secret_ref": "example-ingest-next",
             "tenant": "example", "datastream": "application", "permission": "ingest",

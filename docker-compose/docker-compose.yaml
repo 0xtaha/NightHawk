@@ -187,7 +187,8 @@ services:
     volumes:
       - ${NIGHTHAWK_SECRETS_DIR:?}/runtime/gateway:/etc/nighthawk/gateway:ro,z
     ports:
-      - "${NIGHTHAWK_BIND_ADDRESS:-127.0.0.1}:8443:8443"
+      # The loopback-scoped entry point's port from the platform document, inside and outside.
+      - "${NIGHTHAWK_BIND_ADDRESS:-127.0.0.1}:${NIGHTHAWK_GATEWAY_PORT:?}:${NIGHTHAWK_GATEWAY_PORT:?}"
     networks:
       edge:
         aliases:
@@ -214,7 +215,7 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "false"
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_SERVER_DOMAIN: ${NIGHTHAWK_GRAFANA_HOSTNAME:?}
-      GF_SERVER_ROOT_URL: https://${NIGHTHAWK_GRAFANA_HOSTNAME:?}:8443/
+      GF_SERVER_ROOT_URL: https://${NIGHTHAWK_GRAFANA_HOSTNAME:?}:${NIGHTHAWK_GATEWAY_PORT:?}/
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
       GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
@@ -266,7 +267,11 @@ services:
   grafana-init:
     <<: [*nighthawk-image, *run-as]
     profiles: [tools]
-    command:
+    # An entrypoint, so `compose run grafana-init --credential <id>` and `--update-secrets` append to it.
+    entrypoint:
+      - python
+      - -m
+      - nighthawk
       - provision-grafana
       - --config=/etc/nighthawk/platform/platform.yaml
       - --url=http://grafana:3000
@@ -276,7 +281,7 @@ services:
     volumes:
       - ${NIGHTHAWK_RENDERED_DIR:?}/platform:/etc/nighthawk/platform:ro,z
       - ${NIGHTHAWK_SECRETS_DIR:?}/runtime/grafana:/run/nighthawk/grafana:ro,z
-      - ${NIGHTHAWK_SECRETS_DIR:?}/secrets:/run/nighthawk/secrets/secrets:ro,z
+      - ${NIGHTHAWK_SECRETS_DIR:?}/kv:/run/nighthawk/secrets/kv:ro,z
     networks: [edge]
 
   fixtures:

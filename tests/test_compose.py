@@ -18,6 +18,7 @@ S3_OVERRIDE = COMPOSE_DIR / "docker-compose.s3.yaml"
 ENVIRONMENT = {
     "NIGHTHAWK_RENDERED_DIR": "/rendered", "NIGHTHAWK_UID": "1000",
     "NIGHTHAWK_GID": "1000", "NIGHTHAWK_GATEWAY_HOSTNAME": "gateway.test", "NIGHTHAWK_GRAFANA_HOSTNAME": "grafana.test",
+    "NIGHTHAWK_GATEWAY_PORT": "9443",
 }
 OPTIONAL_PROFILES = {"tools", "sample", "host-collection"}
 ONE_SHOT = {"volume-init", "storage-init", "wait-backends", "wait-alloy"}
@@ -80,8 +81,17 @@ class ComposeTests(unittest.TestCase):
         published = {name: service["ports"] for name, service in self.services.items() if service.get("ports")}
         self.assertEqual(list(published), ["traefik"])
         (port,) = published["traefik"]
-        self.assertEqual((port["host_ip"], str(port["published"]), port["target"]), ("127.0.0.1", "8443", 8443))
-        self.assertIn("${NIGHTHAWK_BIND_ADDRESS:-127.0.0.1}:8443:8443", BASE.read_text(encoding="utf-8"))
+        # The port follows the environment file, which the quickstart fills from the platform document.
+        self.assertEqual((port["host_ip"], str(port["published"]), port["target"]), ("127.0.0.1", "9443", 9443))
+        text = BASE.read_text(encoding="utf-8")
+        self.assertIn("${NIGHTHAWK_BIND_ADDRESS:-127.0.0.1}:${NIGHTHAWK_GATEWAY_PORT:?}:${NIGHTHAWK_GATEWAY_PORT:?}", text)
+        self.assertNotIn("8443", text)
+        self.assertEqual(self.services["grafana"]["environment"]["GF_SERVER_ROOT_URL"], "https://grafana.test:9443/")
+
+    def test_grafana_provisioning_takes_appended_options(self) -> None:
+        service = self.services["grafana-init"]
+        self.assertEqual(service["entrypoint"][:4], ["python", "-m", "nighthawk", "provision-grafana"])
+        self.assertFalse(service.get("command"))
 
     def test_backends_storage_and_auth_are_on_internal_networks_only(self) -> None:
         networks = self.config["networks"]

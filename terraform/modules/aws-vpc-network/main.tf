@@ -29,7 +29,10 @@ resource "aws_subnet" "public" {
   availability_zone       = each.key
   cidr_block              = each.value
   map_public_ip_on_launch = true
-  tags                    = merge(local.tags, { Name = "${var.name_prefix}-public-${each.key}", Tier = "public" })
+  # The role tag is how a load balancer integration finds subnets for internet-facing balancers.
+  tags = merge(local.tags, {
+    Name = "${var.name_prefix}-public-${each.key}", Tier = "public", "kubernetes.io/role/elb" = "1",
+  })
 }
 
 resource "aws_subnet" "private" {
@@ -37,7 +40,10 @@ resource "aws_subnet" "private" {
   vpc_id            = aws_vpc.this.id
   availability_zone = each.key
   cidr_block        = each.value
-  tags              = merge(local.tags, { Name = "${var.name_prefix}-private-${each.key}", Tier = "private" })
+  # Likewise for internal balancers.
+  tags = merge(local.tags, {
+    Name = "${var.name_prefix}-private-${each.key}", Tier = "private", "kubernetes.io/role/internal-elb" = "1",
+  })
 }
 
 resource "aws_eip" "nat" {

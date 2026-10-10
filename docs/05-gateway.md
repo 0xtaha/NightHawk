@@ -4,8 +4,11 @@
 
 The gateway is Traefik plus a small NightHawk auth service. The Traefik
 configuration, the auth policy, and the auth service are implemented and
-unit-tested, including the complete allow/deny decision. Nothing here has
-been run behind a real Traefik; see [what is still unproven](#what-is-still-unproven).
+unit-tested, including the complete allow/deny decision. They also run
+behind Traefik 3.7.13 in the Compose stack, where the end-to-end suite
+observed the behaviour listed under
+[observed at runtime](#observed-at-runtime); see
+[what is still unproven](#what-is-still-unproven) for the rest.
 
 ## How a request is handled
 
@@ -26,8 +29,9 @@ client `X-Scope-OrgID` with the auth service's value.
 
 ## Prerequisites
 
-- The Python environment from [configuration](02-configuration.md), with
-  `sops` and `age` at their pinned versions for the trust commands.
+- The Python environment from [configuration](02-configuration.md), and for
+  the trust commands a Vault that passes `nighthawk doctor`
+  ([secrets workflow](02-configuration.md#secrets-workflow)).
 - A platform document with a `gateway` block
   ([configuration](02-configuration.md#gateway-block)).
 - The auth service reachable only from Traefik. It trusts the certificate
@@ -154,23 +158,26 @@ It is written with mode `0600` and replaced atomically.
 
 ## Trust lifecycle
 
-Every command here checks `sops` and `age` first, as `doctor` does. Add
-`--help` to any of them for the full options.
+Credentials are stored in Vault, and certificates are signed by the authority
+in Vault's PKI mount. Every command here runs the `doctor` check first and
+takes its Vault credential as described in
+[authenticating to Vault](02-configuration.md#authenticating-to-vault); the
+examples assume `VAULT_TOKEN` is set. Add `--help` to any of them for the
+full options.
 
-### First issuance (development)
+The platform never holds the authority's private key. The gateway's trust for
+collector certificates is the authority's public certificate, read from Vault
+when the runtime configuration is rendered.
+
+### First issuance
 
 ```console
 # 1. One secret per declared credential. The value is never printed.
-$ python -m nighthawk generate-credential --config config/tenants.example.yaml \
-    --credential example-ingest --recipient age1...
-Generated and encrypted the secret for example-ingest in secrets/local.sops.yaml
+$ python -m nighthawk generate-credential --config config/tenants.example.yaml --credential example-ingest
+Generated the secret for example-ingest in Vault at nighthawk/local key example-ingest
 $ python -m nighthawk generate-credential --config config/tenants.example.yaml --credential example-query
 
-# 2. A local client CA. Key and certificate are stored SOPS-encrypted.
-$ python -m nighthawk init-ca --config config/tenants.example.yaml --valid-days 365
-Created the gateway client CA (SHA-256 fingerprint ...)
-
-# 3. Certificates. --valid-days is required; there is no default.
+# 2. Certificates. --valid-days is required; there is no default.
 $ python -m nighthawk issue-certificate --config config/tenants.example.yaml \
     --credential example-ingest --valid-days 30 --output-dir .materialized-secrets/collector
 Issued .materialized-secrets/collector/example-ingest.crt.pem with key .materialized-secrets/collector/example-ingest.key.pem
@@ -181,63 +188,129 @@ $ python -m nighthawk issue-certificate --config config/tenants.example.yaml \
     --storage --valid-days 90 --output-dir .materialized-secrets/storage
 ```
 
-`--server` issues one certificate for the gateway and Grafana UI host names.
-`--storage` issues one for exactly the host names of the local storage
+`--server` requests one certificate for the gateway and Grafana UI host names.
+`--storage` requests one for exactly the host names of the local storage
 binding endpoints, and is refused for cloud storage. `quickstart-docker` runs
-all of these steps for you and renews a certificate that has less than seven
-days left.
+all of these steps for you, and issues a certificate again when it has less
+than seven days left or was signed by an authority Vault no longer has.
 
-`--recipient` is needed only when the SOPS file does not exist yet; later
-keys keep the file's recipients. A collector certificate is issued only for
-an identity a credential declares, and carries that identity as its only
-SAN. Keys are written with mode `0600`; `*.pem` and
-`.materialized-secrets/` are ignored by Git. Record the printed fingerprint:
-it is what you revoke.
+How a certificate is obtained:
 
-`generate-credential` and `init-ca` refuse to replace an existing value.
+- The private key is generated where the command runs and written with mode
+  `0600`. Only a signing request is sent to Vault.
+- A collector certificate is requested only for an identity a credential
+  declares, and carries that identity as its only SAN. Nothing is sent to
+  Vault for an undeclared identity.
+- Vault's PKI role decides independently: it refuses a name the role does not
+  allow. After declaring a new collector identity or host name, apply the
+  rendered `vault/pki-roles.json` again
+  ([what the platform needs](02-configuration.md#what-the-platform-needs-from-vault)).
+- The returned certificate is checked before anything is written: its names,
+  identity, usage, key, issuer, and validity must be exactly what was asked
+  for. Otherwise the command fails and writes neither file.
+- `--valid-days` cannot outlive the authority and cannot exceed what the role
+  allows.
+
+`*.pem` and `.materialized-secrets/` are ignored by Git. Record the printed
+fingerprint: it is what the gateway revokes by.
+
+`generate-credential` refuses to replace an existing value; use
+`rotate-secret` for that.
 
 ### Production
 
-A `production` document needs an operator-supplied client CA: put its
-certificate at `client_ca_secret_ref`, omit `client_ca_key_secret_ref`, and
-issue collector certificates with your own PKI using the declared
-`spiffe://nighthawk/<tenant>/<datastream>/<collector>` URI as the only SAN.
-`init-ca` refuses a production document unless `--confirm-local-ca` is given.
+Use your own Vault with a non-root credential and a TLS address; a
+`production` document refuses a root token and a plaintext or loopback
+address. Create the PKI mount's authority yourself, as a root or as an
+intermediate signed by your existing PKI, and apply the rendered policy and
+roles. `bootstrap-dev-vault` refuses a production document. Only a dev-mode
+Vault has been exercised.
 
 ### Rotate a gateway credential without a gap
 
+While a datastream declares two credentials of the same permission, every
+consumer must be told which one to use. Nothing picks one by an implicit
+order: without a choice the command fails and lists the candidates.
+
 1. Declare a second credential for the same tenant, datastream, and
-   permission, with its own secret reference. `validate` accepts it.
+   permission, with its own secret reference. `validate` accepts it. If the
+   reference uses a new Vault path, apply the rendered policy again; if it
+   declares a new certificate identity, apply the rendered PKI roles again.
 2. `generate-credential --credential <new id>`.
 3. `materialize-secrets`, `render-gateway-policy`, then `SIGHUP` the auth
    service. Both credentials now work.
-4. Switch the collector (`render-collector --credential <new id>`) or, for a
-   query credential, run `provision-grafana`.
+4. Switch the consumer to the new credential:
+   - an ingestion credential: `render-collector --credential <new id>`, then
+     reload the collector;
+   - a query credential: `provision-grafana --credential <new id>`. Its data
+     sources change user name, which Grafana provisioning detects and
+     updates. `render-contracts --credential <new id>` renders the same
+     choice into `grafana/desired-state.json`.
 5. Remove the old credential from the document, re-render the policy, and
-   `SIGHUP` again. The old credential now gets 401.
+   `SIGHUP` again. The old credential now gets 401. With one credential left,
+   no `--credential` is needed any more.
 
-Rollback: until step 5 the old credential still works; revert step 4.
+Rollback: until step 5 the old credential still works; repeat step 4 naming
+the old one.
 
-`rotate-secret` replaces a value in place instead. It is simpler but the old
-secret stops working at the next policy reload, so there is a gap until the
-collector has the new one.
+On the Docker quickstart, steps 2 to 4 are one command, run after each edit
+of the platform document:
+
+```console
+# after step 1: both declared, switch to the new one
+$ python -m nighthawk quickstart-docker --credential <new id>
+# after step 5's edit: only the new one is declared
+$ python -m nighthawk quickstart-docker
+```
+
+`--credential` may be repeated, once per datastream and permission that has
+an overlap. An ingestion credential must belong to the collector's
+datastream; a query credential may belong to any datastream, since Grafana
+has data sources for all of them. An undeclared name is refused before
+anything is started.
+
+`rotate-secret` replaces a value in place instead, as a new version in Vault.
+It is simpler but the old secret stops working at the next policy reload, so
+there is a gap until the consumer has the new one. For a query credential
+Grafana must be sent the new password: `provision-grafana --update-secrets`,
+which the Docker quickstart adds by itself when it sees that a query
+credential's value changed since its previous run. Vault keeps the earlier
+version in its history.
 
 ### Renew a collector certificate
 
-Issue a new certificate for the same credential into a new directory and
-switch the collector to it. The policy binds the identity, not the key, so
-nothing is re-rendered. Rollback: switch back to the old certificate while it
-is still valid.
+Issue a new certificate for the same credential into a new directory
+(`issue-certificate --credential <id> --valid-days <n> --output-dir <new>`)
+and switch the collector to it. The policy binds the identity, not the key,
+so nothing is re-rendered. Rollback: switch back to the old certificate while
+it is still valid.
+
+If the authority in Vault is replaced, every certificate has to be issued
+again and the gateway's trust re-rendered. The quickstart does both for the
+certificates it manages and prints that the authority changed.
 
 ### Revoke
 
-- One certificate: add its fingerprint (64 lowercase hex characters) to
-  `gateway.revoked_certificate_fingerprints`, re-render the policy, `SIGHUP`.
-  Other certificates for the same identity keep working.
+- One certificate: revoke it in Vault, then list the fingerprint the command
+  prints in `gateway.revoked_certificate_fingerprints`, re-render the policy,
+  and `SIGHUP`. Other certificates for the same identity keep working.
+
+  ```console
+  $ python -m nighthawk revoke-certificate --config config/tenants.example.yaml \
+      --certificate .materialized-secrets/collector/example-ingest.crt.pem
+  Revoked .materialized-secrets/collector/example-ingest.crt.pem in Vault.
+  Add this fingerprint to gateway.revoked_certificate_fingerprints: <64 hex characters>
+  ```
+
+  The gateway enforces revocation from that list in its policy. It does not
+  consult Vault's revocation list and keeps deciding when Vault is down, so a
+  certificate revoked only in Vault is still accepted until the fingerprint
+  is listed and the policy reloaded.
 - Every certificate of a collector: remove `certificate_identity`, or the
   credential, and re-render.
 
-Rollback: remove the fingerprint and re-render.
+Rollback: remove the fingerprint and re-render. Revocation in Vault cannot be
+undone; issue a new certificate instead.
 
 ## Plaintext links
 
@@ -273,10 +346,24 @@ ran against Traefik 3.7.13 under rootless Podman and observed:
   certificate-bound credential.
 - OTLP gRPC trace export passes `forwardAuth` and reaches Tempo; a denial on
   the gRPC path is a plain HTTP 401 or 403.
-- Each credential reads only its own backend ID; spoofed and multi-tenant
-  `X-Scope-OrgID` values, write-only queries, and query-only writes are
-  refused; a revoked certificate is refused after a policy reload while a
-  sibling certificate keeps working.
+- Each query credential reads only its own backend ID, for every signal. All
+  four datastreams wrote metrics, logs, traces, and profiles (the ones each
+  enables) straight through the gateway, and every other datastream's query
+  credential then tried to read them: nothing was returned, and a signal the
+  reader does not enable was refused with 403.
+- Spoofed and multi-tenant `X-Scope-OrgID` values, write-only queries, and
+  query-only writes are refused. A certificate revoked in Vault and listed by
+  fingerprint is refused after a policy reload while a sibling certificate
+  keeps working.
+- Credential rotation without a gap, by the runbook above. With two
+  ingestion credentials declared, the quickstart refused to proceed without a
+  choice; with the new one named, both were accepted and the collector
+  delivered with the new one; after the old one was removed, its real secret
+  got 401 and delivery continued. The same for a query credential, with
+  Grafana's data source switching user and its queries succeeding at every
+  step.
+- A query credential rotated in place in Vault: the old value got 401, and
+  Grafana's queries kept succeeding after the next quickstart run.
 
 ## What is still unproven
 
@@ -285,6 +372,11 @@ ran against Traefik 3.7.13 under rootless Podman and observed:
   stateless, so it can be replicated.
 - Behaviour on a `restricted-external` entry point from outside the host.
   The suite reaches only the loopback entry point.
+- A certificate signed by an authority the gateway does not trust, at
+  runtime. A missing certificate, a forged header, and a revoked certificate
+  are covered at runtime; a wrong-identity or malformed certificate only by
+  unit tests.
+- Rotation with more than one collector, or under load.
 
 ## Troubleshooting
 

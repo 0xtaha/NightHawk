@@ -85,6 +85,19 @@ class FixtureTests(unittest.TestCase):
         self.assertIn(f'"password": "{sent["markers"]["logjson"]["password"]}"', bodies[2])
         self.assertNotIn("=", bodies[3])
 
+    def test_separated_drop_field_is_a_sanitized_profile_label_and_an_unchanged_attribute(self) -> None:
+        self.data["tenants"][0]["datastreams"][0]["collection"]["drop_fields"] = ["password", "user.email", "api-key"]
+        sent = self.emit()
+        labels = fixtures.profile_labels("run1", self.stream().drop_fields)
+        self.assertEqual(sorted(labels), ["api_key", "password", "run_id", "user_email"])
+        self.assertEqual(labels["user_email"], sent["markers"]["profile"]["user.email"])
+        # The profile push names the sanitized label; OTLP attributes keep the declared name.
+        self.assertIn("user_email", self.posts[3][0])
+        self.assertNotIn("user.email", self.posts[3][0])
+        spans = self.posts[2][2].decode()
+        self.assertIn('"user.email"', spans)
+        self.assertIn('"api-key"', spans)
+
     def test_only_enabled_signals_are_sent(self) -> None:
         signals = self.data["tenants"][0]["datastreams"][0]["signals"]
         del signals["traces"]

@@ -5,7 +5,7 @@ approved SeaweedFS and AWS storage decisions. They do not represent a deployed
 platform.
 
 The configuration validator/intermediate renderer, Pyroscope retention fragment,
-SOPS + age secrets lifecycle, AWS storage Terraform modules, the Terraform
+Vault-backed secrets and certificate lifecycle, AWS storage Terraform modules, the Terraform
 state-bootstrap root, the AWS VPC/EKS compute root, and the self-hosted/Docker
 zero-resource Terraform boundary roots are implemented and locally tested.
 The Alloy collector configurations, the tenant gateway configuration and auth
@@ -26,10 +26,10 @@ flowchart TB
     subgraph Control["Configuration and provisioning"]
         Config["Platform, tenant and network contracts"]
         Renderer["Typed Python validator<br/>and intermediate renderer"]
-        Secrets["SOPS + age<br/>secret lifecycle implemented"]
-        Terraform["Terraform object-storage facade<br/>AWS adapter implemented"]
+        Secrets["HashiCorp Vault, operator-provided<br/>key-value secrets and PKI authority"]
+        Terraform["Terraform: AWS storage, VPC and EKS roots<br/>implemented, plan-tested only"]
         Config --> Renderer
-        Secrets -. "credential and trust references" .-> Renderer
+        Secrets -. "secrets read, certificates signed<br/>by the command-line tool only" .-> Renderer
         Terraform -. "storage output contract" .-> Renderer
     end
 

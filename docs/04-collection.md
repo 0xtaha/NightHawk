@@ -5,9 +5,12 @@
 Collector configurations for Grafana Alloy 1.20.1 are implemented for six
 source types plus a privileged profiling overlay. Their structure is
 unit-tested and every shipped and rendered configuration passes the pinned
-Alloy binary's own checks (see [validation](#validation)). No collector has
-been run against a gateway, so delivery, redaction of real payloads, and
-resource bounds under an outage are not yet observed.
+Alloy binary's own checks (see [validation](#validation)). One of them has
+run: the `docker` profile without host sources, in the Compose stack, where
+delivery of all four signals and redaction of OTLP payloads and pushed
+profile labels were observed. The scrape and log-file pipelines, every other
+profile's host sources, and resource bounds under an outage have not been
+observed.
 
 ## Model
 
@@ -143,14 +146,20 @@ overlay for plain Docker hosts.
 `collection.drop_fields` names are matched case-insensitively and removed
 before delivery.
 
+A label name cannot contain `.` or `-`, so a field such as `user.email`
+reaches the metric, log-label, and profile pipelines as the label
+`user_email`. Those three `labeldrop` rules therefore match each drop field
+and its form with `.` and `-` replaced by `_`. OTLP attributes keep their
+declared names and are matched as declared.
+
 | Where | How |
 | --- | --- |
-| Metric labels | `labeldrop` in `prometheus.relabel.redact` |
-| Log labels | `labeldrop` in `loki.relabel.redact` |
+| Metric labels | `labeldrop` in `prometheus.relabel.redact`, declared and sanitized names |
+| Log labels | `labeldrop` in `loki.relabel.redact`, declared and sanitized names |
 | Log message bodies | `key=value`, `key: value`, and JSON `"key": value` have the value replaced with `[REDACTED]` |
 | OTLP resource, scope, span, span-event, data-point, and log attributes | `delete_matching_keys` in `otelcol.processor.transform.redact` |
 | OTLP log bodies that are strings | `key=value`, `key: value`, and JSON `"key": value` matches are replaced with `[REDACTED]` |
-| Profile labels | `labeldrop` in `pyroscope.relabel.redact` |
+| Profile labels | `labeldrop` in `pyroscope.relabel.redact`, declared and sanitized names |
 
 The OTLP transform runs with `error_mode = "propagate"`: if a statement
 fails, the payload is dropped rather than forwarded unredacted.
@@ -173,8 +182,10 @@ fails, the payload is dropped rather than forwarded unredacted.
   are redacted by pattern before they become structured metadata.
 - **Nothing is hashed.** Fields are removed. Hashing low-entropy values such
   as emails would be reversible by guessing and is not offered.
+- **Sanitized matching is limited to `.` and `-`.** A source that rewrites a
+  field name some other way, for example by adding a prefix, is not matched.
 - A drop-field list is not evidence that telemetry is clean. Test with
-  sensitive fixtures once a stack runs.
+  sensitive fixtures; the Compose stack's end-to-end suite does.
 
 ## Delivery bounds
 
@@ -214,7 +225,10 @@ The `docker` profile rendered `--otlp-only --self-monitoring` runs in the
 Compose stack and has been observed delivering all four signals through the
 gateway with mutual TLS, with every drop-field marker removed
 ([Docker Compose](07-docker-compose.md)). The other profiles' host sources
-have not been run.
+have not been run. That includes the `docker` profile's own host sources: the
+quickstart can render and start them with `--host-collection`, with the node
+exporter pointed at the host's `/proc` and `/sys` through the container's
+mounts, but that needs Docker Engine and has not been run.
 
 ## Component reference
 
@@ -230,7 +244,7 @@ All are generally available; none needs `--stability.level`.
 | `loki.source.docker`, `.file`, `.journal`, `.kubernetes`, `.kubernetes_events`, `local.file_match` | Log sources | `loki/`, `local/` |
 | `loki.relabel`, `loki.process` (`stage.structured_metadata_drop`, `stage.replace`), `loki.write` | Log redaction and delivery | `loki/` |
 | `otelcol.receiver.otlp`, `otelcol.processor.memory_limiter`, `otelcol.processor.transform` | OTLP intake and redaction | `otelcol/` |
-| `otelcol.auth.basic` (`client_auth` with `password_file`), `otelcol.exporter.otlphttp` | OTLP delivery with `sending_queue` and `retry_on_failure` | `otelcol/` |
+| `otelcol.auth.basic` (top-level `username` and `password`, the password read with `local.file`), `otelcol.exporter.otlphttp` | OTLP delivery with `sending_queue` and `retry_on_failure` | `otelcol/` |
 | `pyroscope.receive_http`, `pyroscope.scrape`, `pyroscope.ebpf`, `pyroscope.relabel`, `pyroscope.write` | Profile sources, redaction, delivery | `pyroscope/` |
 
 `delete_matching_keys` and `replace_pattern` are from the OTTL functions of

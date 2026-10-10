@@ -10,7 +10,7 @@ This document defines the implementation contract. It is not evidence of a
 running or production-validated deployment. Component versions, compatibility,
 and acceptance results must be recorded before a deployment is declared supported.
 
-The repository's `Plan.md`, with the storage amendments below, is the specification. Existing Linux machines are
+The repository's `Plan.md`, with its amendments and the storage and secrets amendments below, is the specification. Existing Linux machines are
 the self-hosted infrastructure boundary; provisioning virtual machines is not
 included. No numeric quickstart startup target has been supplied.
 
@@ -45,8 +45,15 @@ before installing Cilium, MetalLB, Longhorn, a pinned Traefik, and cert-manager.
 Preflight checks must reject impossible replica, disk, address-pool, or network
 configurations. The initial supported OS matrix must be verified, not inferred.
 
-AWS provisioning owns VPCs, managed EKS node groups, EBS CSI, S3, KMS, IAM,
-and required DNS/controller permissions. Stateful workloads use on-demand
+AWS provisioning owns VPCs, managed EKS node groups, EBS CSI, S3, KMS, and
+IAM. For the cluster that means explicit API access (endpoint exposure and
+access entries stated by the operator), KMS encryption of Kubernetes secrets,
+encrypted node volumes, the network-contract security group attached to every
+node, and IRSA roles for the EBS CSI driver and, when enabled, for DNS record
+management, certificate DNS-01 validation, and node autoscaling. IAM for the
+AWS load balancer controller is deferred to phase 6, where a controller
+release is pinned. None of it has been applied to an account; it is verified
+by plan-only tests with a mocked provider. Stateful workloads use on-demand
 capacity; optional spot capacity is limited to suitable stateless workloads.
 Use IRSA rather than static AWS keys. Install Helm releases only after cluster
 creation succeeds; Terraform must not initialize Kubernetes providers against
@@ -143,22 +150,57 @@ references, and unauthorized credential mappings. There is no implicit
 production retention policy.
 
 The network contract owns ports, protocols, purpose, direction, and scope.
-Firewall inputs and port documentation are generated from it. Stateful security
-groups and stateless NACLs require different return-traffic rules.
+`render-contracts` generates a port table (`ports.md`) and a sorted JSON copy
+of the contract (`network.json`) from it; neither is a firewall
+configuration. Firewall-format outputs such as UFW or iptables rules are not
+generated yet. The gateway's upstream ports and the AWS security group rules
+are checked against the contract. Stateful security groups and stateless
+NACLs require different return-traffic rules.
 
-Generated decrypted configuration is ignored by Git, created with restricted
-permissions, and cleaned up explicitly. Production requires operator-provided
-age recipients and trust/DNS inputs. SOPS with age is the implemented secret
-lifecycle: `nighthawk doctor` verifies the `sops`/`age` binaries against the
-pinned versions in `config/versions.yaml` before any secrets command runs,
-`nighthawk generate-recipient` creates age key pairs for non-production use,
-`nighthawk encrypt-secret` and `nighthawk rotate-secret` manage SOPS-encrypted
-files under `secrets/`, and `nighthawk materialize-secrets` /
-`nighthawk clean-secrets` decrypt a validated platform document's referenced
-secrets into `.materialized-secrets/` (owner-only permissions) and remove them
-again. Production-profile documents reject locally auto-generated age
-recipients unless explicitly confirmed. Examples contain references, not
+Secrets are stored in a HashiCorp Vault key-value mount and certificates are
+signed by the authority in that Vault's PKI mount; see the secrets amendment
+below. `nighthawk doctor` checks the declared Vault before any command reads
+or writes a secret or requests a certificate, `nighthawk store-secret` and
+`nighthawk rotate-secret` write values with check-and-set, and
+`nighthawk materialize-secrets` / `nighthawk clean-secrets` read a validated
+platform document's referenced secrets into `.materialized-secrets/`
+(owner-only permissions, ignored by Git) and remove them again. A
+production-profile document refuses a plaintext or loopback Vault address and
+a credential carrying the root policy. Examples contain references, not
 working credentials.
+
+### Secrets amendment
+
+`Plan.md` chose SOPS + age as the secret workflow for every environment. That
+decision is replaced:
+
+- **Store.** Vault's key-value engine (version 2) is the only secret store in
+  all three deployment profiles. There are no encrypted files in the
+  repository, no age keys, and no `sops` or `age` tooling.
+- **Certificates.** Vault's PKI engine signs the gateway, storage, and
+  collector certificates. The platform no longer creates a certificate
+  authority and never reads the authority's private key; it generates each
+  leaf key locally and sends only a signing request.
+- **Ownership.** The Vault server is provided by the operator. The platform
+  does not deploy, initialize, unseal, back up, or upgrade it. It renders the
+  access policy and PKI role definitions it needs, limited to the declared
+  secret paths, hostnames, and collector identities, for the operator to
+  apply. A development helper applies them to a disposable dev-mode Vault and
+  refuses a production document.
+- **Runtime.** Only the command-line tool talks to Vault. Containers read
+  materialized files and never receive a Vault credential. The gateway
+  enforces certificate revocation from its own policy and does not depend on
+  Vault to decide a request.
+- **Licence.** Vault is distributed under the Business Source License 1.1,
+  not an open-source licence. The platform uses only Vault's HTTP API. Only
+  HashiCorp Vault is in the compatibility matrix and tested; API-compatible
+  servers such as OpenBao are untested.
+- **Deferred to phase 6.** How secrets reach workloads inside Kubernetes
+  (an agent, an operator, or a Kubernetes auth method) is decided when those
+  workloads exist. Host-side materialization is the only delivery implemented.
+- **Not verified.** Everything has been exercised against a dev-mode Vault in
+  a local container only. Namespaces, high availability, seal behaviour under
+  failure, and an operator-managed PKI hierarchy have not.
 
 ## Retention and object storage
 
@@ -277,11 +319,66 @@ Remote changes, cloud/DNS resources, Docker daemon setup, billable validation,
 and destructive purges need separate authorization. Ordinary teardown preserves
 data and never destroys state-bootstrap resources.
 
+### Recorded deferrals
+
+Items that `Plan.md` todos 1 to 4 name and that are deliberately not built
+yet. The same list is an amendment in `Plan.md`.
+
+| Item | Owned by | Why later |
+| --- | --- | --- |
+| Ansible collection pins, and verification of the OS matrix | Phase 5 | Their first consumer, the Ansible automation, does not exist yet |
+| Chart lockfiles and Kubernetes image digests | Phase 6 | There is no chart to lock until the workloads are added |
+| IAM for the AWS load balancer controller | Phase 6 | Its policy is published per controller release, and none is pinned yet |
+| Firewall-format outputs such as UFW or iptables rules | Phase 8 | Only the port table and a JSON copy of the contract are generated today |
+| Prerequisite checks beyond Vault and Terraform | Phase 9 | They belong with the orchestration that needs the other tools |
+| Modelled backups, and an expiry for old state-bucket versions | Phase 10 | They belong with backup and restore |
+
+Also deferred and recorded where they arise: retention deletion tests, and
+production single-node Docker Compose.
+
 ## Compatibility research
 
-Candidate releases found in upstream research are Mimir 3.2.1, Tempo 3.0.3,
-Pyroscope 2.3.1, and SeaweedFS 4.47 (chart 4.47.0). These are not a tested
-compatibility matrix or a completed image-digest lock.
+`config/versions.yaml` is the single matrix every consumer resolves pins
+from. Where it stands:
+
+- **Verified at runtime**, in the Docker Compose stack under rootless Podman:
+  Mimir 3.2.1, Loki 3.7.8, Tempo 3.0.3, Pyroscope 2.3.1 (v2 storage),
+  SeaweedFS 4.47, Alloy 1.20.1, and HashiCorp Vault 2.1.2 in dev mode. A
+  component's `runtime_verified` flag must be reset when its pin changes.
+- **Pinned by digest**: every image the Compose profile runs or builds on,
+  and the Vault image the tests use. `check-pins` compares the Compose file,
+  the Terraform version files, and the Alloy sources with the matrix.
+- **Pinned but never run**: everything for Kubernetes and AWS (k3s, Cilium,
+  MetalLB, Longhorn, Traefik's chart, cert-manager, Strimzi, EKS, the EBS CSI
+  driver) and all Helm charts. Their images have no digests yet.
+- **Chart and backend versions agree**: matrix validation fails when a chart
+  packages a different application version than the backend pin, unless the
+  difference is recorded with a reason. The Tempo chart is pinned to the
+  newest release that packages Tempo 3.0.3. The Mimir chart is the one
+  recorded exception: only weekly pre-release charts exist, and they package
+  a weekly build.
+- **Not pinned**: Ansible collections, and chart lockfiles. Both belong to
+  the phases that first consume them.
+
+Licence and distribution of each image the Compose profile uses, from the
+upstream repositories and the registries the matrix pins:
+
+| Image | Registry and repository | Licence |
+| --- | --- | --- |
+| Mimir | `docker.io/grafana/mimir` | AGPL-3.0 |
+| Loki | `docker.io/grafana/loki` | AGPL-3.0 |
+| Tempo | `docker.io/grafana/tempo` | AGPL-3.0 |
+| Pyroscope | `docker.io/grafana/pyroscope` | AGPL-3.0 |
+| Grafana | `docker.io/grafana/grafana` | AGPL-3.0 |
+| Alloy | `docker.io/grafana/alloy` | Apache-2.0 |
+| Traefik | `docker.io/library/traefik` | MIT |
+| SeaweedFS | `docker.io/chrislusf/seaweedfs` | Apache-2.0 |
+| Python base of the NightHawk image | `docker.io/library/python` | Python Software Foundation licence, on a Debian base with its own package licences |
+| Vault (tests and development only, not part of the stack) | `docker.io/hashicorp/vault` | Business Source License 1.1 |
+
+The platform runs these images unmodified and does not redistribute them. The
+AGPL components are reached only over the network. This table records what
+upstream states; it is not a licence review.
 
 Pyroscope 2.3.1 v2 implements tenant `retention_period` overrides and wires them
 into metastore cleanup. That field is hidden from generated configuration

@@ -2,6 +2,14 @@
 
 ## Objective and current state
 
+> **Amendment:** This section and "Access and execution boundaries" describe
+> the situation before any implementation: an empty repository, a Windows
+> host, and no verified edit access. They are kept as the plan's starting
+> point, not as the present state. Phases 1 to 4 are implemented; their
+> accepted behaviour is in `openspec/specs/`, the history in
+> `openspec/changes/archive/`, and what was and was not verified in
+> `docs/01-architecture.md` and `docs/07-docker-compose.md`.
+
 Build the standalone LGTM+ platform at the NightHawk repository root, implementing the attached brief across Docker Compose, self-hosted Kubernetes, and AWS EKS. This is an implementation plan only; no repository files have been changed.
 
 The repository contains only a two-line README and has a clean working tree. There is no existing application or deployment to migrate. The branch has been renamed to `wp8fyqi-cariad-grafana-observability-platform`.
@@ -37,6 +45,9 @@ The Windows host has Python and WSL with an Ubuntu distribution. A read-only che
 ### Deployment profiles
 
 1. **Docker:** monolithic Mimir, Loki, Tempo, and Pyroscope; Alloy; Grafana; MinIO; and an authenticated TLS gateway. Named persistent volumes, private internal networks, readiness checks, restart policies, and automated bucket provisioning. The local quickstart uses generated credentials and a local CA; it never exposes unauthenticated backend ports. Localhost-only access is the default. Production single-node use requires explicit public/private endpoint configuration and is documented as non-HA.
+
+   > **Amendment:** Read MinIO here as SeaweedFS, the approved local object
+   > storage; see the Storage amendments section of `docs/01-architecture.md`.
 2. **Self-hosted Kubernetes:** Ansible installs k3s with its bundled Flannel, Traefik, and ServiceLB disabled before installing Cilium, MetalLB, Longhorn, a pinned Traefik release, and cert-manager. Support a single-node development profile and a separately sized multi-node production profile. Production stateful replicas and storage must span distinct nodes; preflight rejects impossible replica/disk/IP-pool configurations.
 3. **AWS:** Terraform provisions a VPC across availability zones, EKS managed node groups, EBS CSI, S3, KMS/IAM integration, private service connectivity, and remote state prerequisites. Use on-demand capacity for stateful workloads and optional spot capacity for suitable stateless workloads. Traefik and cert-manager provide a consistent TLS ingress model, backed by an AWS load balancer and automated DNS. Use IRSA rather than static AWS credentials.
 
@@ -55,6 +66,20 @@ Use official Grafana charts, with a small platform chart for shared policies, ga
 ### Security and tenant boundaries
 
 - Use SOPS + age as the baseline secret workflow for all environments, including automation for generation, encryption, decryption, rotation, and restricted runtime materialization. Production requires operator-provided age recipients and configured trust/DNS inputs; these are prerequisites, not click-ops.
+
+  > **Amendment:** The SOPS + age decision above was superseded after phase 4.
+  > Secrets are stored in HashiCorp Vault's key-value engine, and gateway,
+  > storage, and collector certificates are signed by Vault's PKI engine, in
+  > every environment. The Vault server is provided by the operator; the
+  > platform renders the policy and PKI roles it needs and never deploys,
+  > unseals, or holds a long-lived credential for it. `sops`, `age`, encrypted
+  > files under `secrets/`, age recipients, and the locally generated
+  > certificate authority are removed, and this also applies to the SOPS and
+  > age pins listed under todo 1. Production prerequisites become a TLS Vault
+  > address that is not loopback and a non-root credential. See
+  > `docs/01-architecture.md`'s Secrets amendment for the rationale, the
+  > licence note, and what is deferred to phase 6.
+
 - Implement a shared gateway authentication policy that binds credentials and remote collector certificate identity to permitted backend tenant IDs. Reject unknown, missing, conflicting, or spoofed tenant headers rather than trusting `X-Scope-OrgID` from clients.
 - Separate ingestion-only collector credentials from query/provisioning credentials. Validate both HTTP and gRPC gateway behavior; support OTLP HTTP as a documented collector transport.
 - Provision a Grafana organization per customer tenant, with datastream-specific data sources and organization-scoped dashboards, alerts, and credentials. Disable anonymous access. Verify that non-admin users cannot query another customer's sources or change trusted tenant mappings.
@@ -83,6 +108,11 @@ Start repository implementation with `docs/01-architecture.md` and Terraform mod
 
 Resolve and pin a tested compatibility matrix covering Terraform/providers, Ansible collections, OS distributions/architectures, Kubernetes/k3s, Helm charts, images/digests, Kafka/Strimzi, Cilium, Longhorn, MetalLB, Traefik, cert-manager, SOPS, and age. Add provider/chart lockfiles to the repository. Confirm image distribution/licensing and MinIO server/client availability, including a pinned source-build path if required; do not silently substitute another storage product.
 
+> **Amendment:** "MinIO server/client availability" above was resolved by
+> replacing MinIO with SeaweedFS, explicitly and not silently; see the Storage
+> amendments section of `docs/01-architecture.md`. The Ansible collection pins
+> are deferred; see the recorded deferrals at the end of these todos.
+
 Create validated platform/tenant/network schemas, examples, renderer, secret workflow, prerequisites checks, and shared test fixtures. Record supported combinations and migration constraints, including Pyroscope retention and Kafka requirements.
 
 ### 2. Implement Terraform infrastructure and state bootstrap
@@ -100,6 +130,9 @@ Add complete modules for `aws-vpc-network`, `aws-eks`, `aws-s3-backends`, and `m
 Add a separate AWS state-bootstrap root plus `environments/aws`, `environments/self-hosted-k8s`, and `environments/docker`. Backend configuration belongs to each executable root; avoid an ineffective top-level-only `backend.tf`.
 
 For Docker and self-hosted nodes, use Ansible for host-local resources. Terraform manages explicitly available outside-cluster resources; no invented provider-dependent firewall/VM resources or fake empty applies. Define MinIO ownership so Terraform and Ansible never compete to manage the same bucket or identity.
+
+> **Amendment:** "MinIO ownership" above reads as SeaweedFS ownership: Compose
+> initialization and Ansible/Helm own it, and Terraform does not manage it.
 
 Implement per-component IRSA policies, S3 lifecycle safeguards, security groups derived from the shared network contract, EKS access configuration, EBS encryption, and necessary DNS/controller permissions. Keep infrastructure provisioning separate from Helm installation to avoid provider initialization races against a cluster that does not exist yet.
 
@@ -130,6 +163,8 @@ Validate SSH/admin allowlists before firewall changes; avoid locking out automat
 Add exact-version official Grafana chart values for self-hosted and AWS profiles, release orchestration, and the small supporting chart.
 
 Wire MinIO/S3, TLS, gateway policies, tenant runtime configuration, service account roles, resource requests/limits, persistent storage, probes, disruption budgets, topology spread, autoscaling, and NetworkPolicies.
+
+> **Amendment:** "MinIO/S3" above reads as SeaweedFS/S3.
 
 Include Kafka where required, Cluster Autoscaler on AWS, metrics-server for HPA, and HPA only for verified horizontally scalable query/Grafana configurations. Multi-replica Grafana requires shared PostgreSQL and supported unified-alerting HA configuration; provision and document those dependencies rather than scaling SQLite-backed instances.
 
@@ -172,6 +207,22 @@ Finish README, `docs/00-quickstart.md`, and all ten numbered documents in the br
 Explain maintenance, upgrades, certificate and secret rotation, Kafka recovery, backup/restore, retention/deletion semantics, cardinality/cost limits, monolithic-to-distributed migrations, and non-HA tradeoffs.
 
 Verify commands against implemented targets. The Docker quickstart has an explicit prerequisites/download-speed/resource assumption and a measured cold/warm-start check against the brief's startup target; do not claim the target without measurement.
+
+> **Amendment: recorded deferrals.** A comparison of todos 1 to 4 with the
+> repository found items those todos name that are deliberately not built
+> yet. Each is owned by a later todo:
+>
+> | Item | Named in | Owned by | Why later |
+> | --- | --- | --- | --- |
+> | Ansible collection pins, and verification of the OS matrix | todo 1 | todo 5 | Their first consumer, the Ansible automation, does not exist yet |
+> | Chart lockfiles and Kubernetes image digests | todo 1 | todo 6 | There is no chart to lock until the workloads are added |
+> | IAM for the AWS load balancer controller | todo 2 | todo 6 | Its policy is published per controller release, and none is pinned yet |
+> | Firewall-format outputs such as UFW or iptables rules | conventions | todo 8 | Todo 8 already owns them; today only the port table and a JSON copy of the contract are generated |
+> | Prerequisite checks beyond Vault and Terraform | todo 1 | todo 9 | They belong with the orchestration that needs the other tools |
+> | Modelled backups, and an expiry for old state-bucket versions | storage conventions | todo 10 | They belong with backup and restore |
+>
+> Already recorded elsewhere and unchanged: retention deletion tests, and
+> production single-node Docker Compose.
 
 ## Dependencies and execution order
 

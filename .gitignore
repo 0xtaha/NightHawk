@@ -13,16 +13,12 @@ backend.hcl
 .env
 .env.*
 !.env.example
-secrets/*
-!secrets/*.sops.yaml
-!secrets/*.sops.json
+# Nothing is kept here any more: secrets live in Vault. The directory stays ignored so files
+# left by the earlier file-based workflow, including a private key, cannot be committed.
+secrets/
 .materialized-secrets/
 *.pem
 *.key
 !*.example
 .tools/
 .materialized-secrets-e2e/
-# Development secrets written by quickstart-docker and the end-to-end tests. They are encrypted
-# to a local age key that is never committed, so committing them is useless.
-secrets/local.sops.yaml
-secrets/e2e.sops.yaml

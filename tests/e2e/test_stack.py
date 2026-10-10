@@ -2,7 +2,9 @@
 
 Skipped unless NIGHTHAWK_E2E=1. They start their own stack (project `nighthawk-e2e`) from
 tests/e2e/platform.yaml, so the default stack must be stopped first: both publish 8443.
-Set NIGHTHAWK_E2E_KEEP=1 to leave the stack running afterwards.
+They also start their own disposable dev-mode Vault (container `nighthawk-e2e-vault`, the
+image pinned in config/versions.yaml) on loopback port $NIGHTHAWK_E2E_VAULT_PORT (default
+8210) and bootstrap it. Set NIGHTHAWK_E2E_KEEP=1 to leave the stack and that Vault running.
 """
 
 from __future__ import annotations
@@ -11,39 +13,83 @@ import base64
 import hashlib
 import json
 import os
-import shutil
+import re
 import subprocess
 import time
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import yaml
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 
-from nighthawk import fixtures, quickstart, trust
-from nighthawk.authz import certificate_fingerprint
-from nighthawk.config import ROOT, load_platform
+from nighthawk import fixtures, quickstart, secrets, trust, vault
+from nighthawk.config import ROOT, load_platform, load_versions
 from nighthawk.grafana import datasource_uid
+from nighthawk.secrets import materialized_path
 
 ENABLED = os.environ.get("NIGHTHAWK_E2E") == "1"
 WORK = ROOT / ".generated" / "e2e"
 CONFIG = WORK / "platform.yaml"
 SECRETS = ROOT / ".materialized-secrets-e2e"
 PORT = 8443
+VAULT_CONTAINER = "nighthawk-e2e-vault"
+VAULT_ADDRESS = f"http://127.0.0.1:{int(os.environ.get('NIGHTHAWK_E2E_VAULT_PORT', '8210'))}"
+# A throwaway dev-mode server on loopback; this token protects nothing and is never written to disk.
+VAULT_DEV_TOKEN = "nighthawk-e2e-dev-root"
 PROFILE_TYPE = fixtures.PROFILE_TYPE
 
 
-def options() -> quickstart.Options:
+def options(*credentials: str) -> quickstart.Options:
     compose = tuple(os.environ.get("NIGHTHAWK_COMPOSE", "docker compose").split())
     return quickstart.Options(
         config=CONFIG, compose=compose, container=compose[0], rendered_dir=WORK / "rendered",
         secrets_dir=SECRETS, project="nighthawk-e2e", build=False, timeout=600, tenant="acme", datastream="web",
+        credentials=credentials,
     )
 
 
-def bring_up() -> None:
-    quickstart.quickstart(options(), out=lambda line: None)
+def bring_up(*credentials: str) -> None:
+    quickstart.quickstart(options(*credentials), out=lambda line: None)
+
+
+def hours(duration: str) -> float:
+    """Hours in a duration as a backend reports it: `1w`, `4d`, `96h`, or `48h0m0s`."""
+    units = {"w": 168, "d": 24, "h": 1, "m": 1 / 60, "s": 1 / 3600}
+    parts = re.findall(r"([0-9]+)([wdhms])", duration.strip())
+    if not parts or "".join(number + unit for number, unit in parts) != duration.strip():
+        raise AssertionError(f"not a duration: {duration!r}")
+    return sum(int(number) * units[unit] for number, unit in parts)
+
+
+def start_vault() -> None:
+    """Start the pinned Vault image in dev mode, unless a kept one is already answering, and bootstrap it."""
+    def healthy() -> bool:
+        try:
+            with urllib.request.urlopen(f"{VAULT_ADDRESS}/v1/sys/health", timeout=2) as response:
+                return response.status == 200
+        except (urllib.error.URLError, OSError):
+            return False
+
+    container = options().container
+    if not healthy():
+        image = load_versions()["secrets_store"]["vault"]["image"]
+        subprocess.run([container, "rm", "--force", VAULT_CONTAINER], capture_output=True, timeout=60)
+        result = subprocess.run([
+            container, "run", "--detach", "--name", VAULT_CONTAINER, "--cap-add", "IPC_LOCK",
+            "--publish", f"{VAULT_ADDRESS.removeprefix('http://')}:8200",
+            "--env", f"VAULT_DEV_ROOT_TOKEN_ID={VAULT_DEV_TOKEN}", "--env", "VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200",
+            f"{image['repository']}@{image['digest']}", "server", "-dev",
+        ], capture_output=True, text=True, timeout=300)
+        if result.returncode != 0:
+            raise AssertionError(f"could not start the development Vault: {result.stderr[-600:]}")
+        if not eventually(healthy, timeout=60, interval=1):
+            raise AssertionError("the development Vault did not become healthy")
+    os.environ["VAULT_TOKEN"] = VAULT_DEV_TOKEN
+    platform = load_platform(CONFIG)
+    vault.bootstrap_dev(platform, vault.connect(platform), confirmed=True, ca_valid_days=365)
 
 
 def compose(*args: str, check: bool = True, timeout: int = 300) -> subprocess.CompletedProcess:
@@ -62,8 +108,7 @@ def in_network(code: str) -> str:
 
 def secret(reference: str) -> str:
     platform = load_platform(CONFIG)
-    item = platform.secrets[reference]
-    return (SECRETS / item.file / item.key).read_text(encoding="utf-8").rstrip("\r\n")
+    return materialized_path(SECRETS, platform.secrets[reference]).read_text(encoding="utf-8").rstrip("\r\n")
 
 
 def call(
@@ -139,13 +184,17 @@ def setUpModule() -> None:
     if not ENABLED:
         raise unittest.SkipTest("set NIGHTHAWK_E2E=1 to run against a live stack")
     WORK.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(ROOT / "tests" / "e2e" / "platform.yaml", CONFIG)
+    document = yaml.safe_load((ROOT / "tests" / "e2e" / "platform.yaml").read_text(encoding="utf-8"))
+    document["vault"]["address"] = VAULT_ADDRESS
+    CONFIG.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    start_vault()
     bring_up()
 
 
 def tearDownModule() -> None:
     if ENABLED and os.environ.get("NIGHTHAWK_E2E_KEEP") != "1":
         quickstart.teardown(options(), purge=True, confirmed=True, out=lambda line: None)
+        subprocess.run([options().container, "rm", "--force", VAULT_CONTAINER], capture_output=True, timeout=60)
 
 
 class StackTests(unittest.TestCase):
@@ -155,6 +204,12 @@ class StackTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.sent = emit("acme", "web", cls.run_id)
+
+    def test_00_provisioning_again_straight_after_the_first_start_changes_nothing(self) -> None:
+        # Grafana makes an organization's first data source its default by itself; the first apply
+        # must already have put that right.
+        again = compose("run", "--rm", "--no-deps", "grafana-init").stdout
+        self.assertEqual(again.strip().splitlines()[-1], "no changes", again)
 
     # ---- signals through the collector -------------------------------------------------
 
@@ -200,8 +255,20 @@ class StackTests(unittest.TestCase):
     def test_02_sensitive_markers_are_absent_and_free_text_is_retained(self) -> None:
         eventually(lambda: len(query_logs("acme-web-query", f"fixture {self.run_id}")[1]) == 4)
         eventually(self.trace)
-        status, labels = call("/metrics/prometheus/api/v1/series", "acme-web-query", params={"match[]": fixtures.METRIC})
+        status, labels = call(
+            "/metrics/prometheus/api/v1/series", "acme-web-query",
+            params={"match[]": f'{fixtures.METRIC}{{run_id="{self.run_id}"}}'},
+        )
         self.assertEqual(status, 200)
+        # The fixture series itself came back, so the absence of markers below means something.
+        (series,) = json.loads(labels)["data"]
+        self.assertEqual((series["__name__"], series["run_id"]), (fixtures.METRIC, self.run_id))
+        # Resource attributes become labels of target_info; the resource markers must not be among them.
+        status, resource_labels = eventually(lambda: (lambda result: result if fixtures.SERVICE in result[1] else None)(
+            call("/metrics/prometheus/api/v1/series", "acme-web-query", params={"match[]": "target_info"})
+        ))
+        self.assertEqual(status, 200)
+        self.assertIn(fixtures.SERVICE, resource_labels)
         status, streams = call(
             "/logs/loki/api/v1/query_range", "acme-web-query",
             params={"query": f'{{service_name="{fixtures.SERVICE}"}} |= "{self.run_id}"'},
@@ -217,7 +284,7 @@ class StackTests(unittest.TestCase):
         )
         self.assertEqual(status, 200, profile_labels)
         self.assertIn(self.run_id, profile_labels)
-        everything = "\n".join([labels, streams, self.trace(), profile_labels])
+        everything = "\n".join([labels, resource_labels, streams, self.trace(), profile_labels])
         self.assertIn(self.run_id, everything)
         for position, by_field in self.sent["markers"].items():
             for field, value in by_field.items():
@@ -229,16 +296,69 @@ class StackTests(unittest.TestCase):
     # ---- tenant isolation at the gateway -----------------------------------------------
 
     def test_03_each_credential_reads_only_its_own_backend(self) -> None:
-        pairs = ["acme-web", "acme-batch", "globex-web"]
-        needles = {pair: f"isolation-{pair}-{self.run_id}" for pair in pairs}
-        for pair, needle in needles.items():
-            self.assertEqual(push_log(f"{pair}-ingest", needle), 204, pair)
-        for reader in pairs + ["globex-edge"]:
-            for writer, needle in needles.items():
-                with self.subTest(reader=reader, writer=writer):
-                    found = eventually(lambda: query_logs(f"{reader}-query", needle)[1]) if reader == writer \
-                        else query_logs(f"{reader}-query", needle)[1]
-                    self.assertEqual(bool(found), reader == writer)
+        """All four pairs write every signal they enable; every reader then tries every writer's data."""
+        platform = load_platform(CONFIG)
+        streams = {f"{stream.tenant}-{stream.datastream}": stream for stream in platform.streams}
+        self.assertEqual(sorted(streams), ["acme-batch", "acme-web", "globex-edge", "globex-web"])
+        # globex/edge ingests only with its certificate.
+        issued = SECRETS / "runtime" / "e2e-certificates-isolation"
+        if not (issued / "globex-edge-ingest.crt.pem").exists():
+            trust.issue_certificate(platform, issued, 2, vault.connect(platform), credential_id="globex-edge-ingest")
+        certificates = {"globex-edge": issued / "globex-edge-ingest.crt.pem"}
+        runs: dict[str, str] = {}
+        for index, (pair, stream) in enumerate(sorted(streams.items())):
+            runs[pair] = f"iso{index}{self.run_id}"
+
+            def post(url: str, headers: dict[str, str], body: bytes, pair: str = pair) -> int:
+                return call(url, f"{pair}-ingest", method="POST", headers=headers, data=body,
+                            certificate=certificates.get(pair))[0]
+
+            # Straight through the gateway: OTLP at /v1/<signal>, profiles at /profiles/ingest.
+            sent = fixtures.emit(stream, runs[pair], "", "/profiles", post=post)
+            self.assertEqual(sorted(sent["signals"]), sorted(stream.signals), pair)
+
+        def read(reader: str, signal: str, run: str) -> tuple[int, bool]:
+            credential = f"{reader}-query"
+            if signal == "metrics":
+                status, body = call("/metrics/prometheus/api/v1/query", credential,
+                                    params={"query": f'{fixtures.METRIC}{{run_id="{run}"}}'})
+                return status, status == 200 and bool(json.loads(body)["data"]["result"])
+            if signal == "logs":
+                status, lines = query_logs(credential, run)
+                return status, bool(lines)
+            if signal == "traces":
+                status, body = call(f"/traces/api/traces/{fixtures.trace_id(run)}", credential)
+                return status, status == 200 and "fixture-parent" in body
+            now = int(time.time())
+            status, body = call(
+                "/profiles/querier.v1.QuerierService/Series", credential, method="POST",
+                headers={"Content-Type": "application/json"},
+                data=json.dumps({
+                    "matchers": [f'{{run_id="{run}"}}'], "labelNames": [],
+                    "start": (now - 3600) * 1000, "end": (now + 60) * 1000,
+                }).encode(),
+            )
+            return status, status == 200 and run in body
+
+        # First every owner sees its own data, so a later miss is not just ingestion delay.
+        for pair, stream in sorted(streams.items()):
+            for signal in sorted(stream.signals):
+                with self.subTest(owner=pair, signal=signal):
+                    self.assertTrue(eventually(lambda: read(pair, signal, runs[pair])[1], timeout=180))
+        checked = 0
+        for reader, reader_stream in sorted(streams.items()):
+            for writer, writer_stream in sorted(streams.items()):
+                if reader == writer:
+                    continue
+                for signal in sorted(writer_stream.signals):
+                    with self.subTest(reader=reader, writer=writer, signal=signal):
+                        status, found = read(reader, signal, runs[writer])
+                        self.assertFalse(found, "another datastream's data was returned")
+                        if signal not in reader_stream.signals:
+                            self.assertEqual(status, 403)
+                        checked += 1
+        # 4 readers x 3 other writers, over each writer's enabled signals (4 + 2 + 4 + 4).
+        self.assertEqual(checked, 3 * (4 + 2 + 4 + 4))
 
     def test_04_permissions_and_tenant_headers_are_enforced(self) -> None:
         self.assertEqual(query_logs("acme-web-ingest", "x")[0], 403)
@@ -270,10 +390,8 @@ class StackTests(unittest.TestCase):
     def test_06_certificate_bound_credential_needs_its_certificate(self) -> None:
         issued = SECRETS / "runtime" / "e2e-certificates"
         if not (issued / "globex-edge-ingest.crt.pem").exists():
-            trust.issue_certificate(
-                load_platform(CONFIG), issued, 2, credential_id="globex-edge-ingest", root=ROOT,
-                runner=lambda args, **kwargs: subprocess.run(args, env=quickstart._environment(options()), **kwargs),
-            )
+            platform = load_platform(CONFIG)
+            trust.issue_certificate(platform, issued, 2, vault.connect(platform), credential_id="globex-edge-ingest")
         certificate = issued / "globex-edge-ingest.crt.pem"
         self.assertEqual(push_log("globex-edge-ingest", "with-certificate", certificate=certificate), 204)
         self.assertEqual(push_log("globex-edge-ingest", "without-certificate"), 403)
@@ -292,13 +410,13 @@ class StackTests(unittest.TestCase):
         issued = SECRETS / "runtime" / "e2e-certificates"
         second = SECRETS / "runtime" / "e2e-certificates-second"
         if not (second / "globex-edge-ingest.crt.pem").exists():
-            trust.issue_certificate(
-                load_platform(CONFIG), second, 2, credential_id="globex-edge-ingest", root=ROOT,
-                runner=lambda args, **kwargs: subprocess.run(args, env=quickstart._environment(options()), **kwargs),
-            )
-        first = x509.load_pem_x509_certificate((issued / "globex-edge-ingest.crt.pem").read_bytes())
+            platform = load_platform(CONFIG)
+            trust.issue_certificate(platform, second, 2, vault.connect(platform), credential_id="globex-edge-ingest")
+        # Revoked in Vault, and enforced at the gateway from the fingerprint that command reports.
+        platform = load_platform(CONFIG)
+        fingerprint = trust.revoke_certificate(vault.connect(platform), issued / "globex-edge-ingest.crt.pem")
         document = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
-        document["gateway"]["revoked_certificate_fingerprints"] = [certificate_fingerprint(first)]
+        document["gateway"]["revoked_certificate_fingerprints"] = [fingerprint]
         CONFIG.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
         bring_up()
         revoked = lambda: push_log("globex-edge-ingest", "revoked", certificate=issued / "globex-edge-ingest.crt.pem")
@@ -330,36 +448,67 @@ class StackTests(unittest.TestCase):
     # ---- backends and exposure ---------------------------------------------------------
 
     def test_09_backends_require_a_tenant_and_report_the_rendered_overrides(self) -> None:
+        platform = load_platform(CONFIG)
+        tenants = [stream.backend_id for stream in platform.streams]
         output = in_network(
             "import urllib.request, urllib.error, json\n"
-            "def get(url, tenant=None):\n"
-            "    request = urllib.request.Request(url, headers={'X-Scope-OrgID': tenant} if tenant else {})\n"
+            "def get(url, tenant=None, body=None):\n"
+            "    headers = {'X-Scope-OrgID': tenant} if tenant else {}\n"
+            "    if body is not None:\n"
+            "        headers['Content-Type'] = 'application/json'\n"
+            "    request = urllib.request.Request(url, headers=headers, data=body)\n"
             "    try:\n"
             "        with urllib.request.urlopen(request, timeout=10) as response:\n"
             "            return response.status, response.read().decode()\n"
             "    except urllib.error.HTTPError as error:\n"
             "        return error.code, error.read().decode()\n"
+            "import time\n"
+            "profiles = 'http://pyroscope:4040/querier.v1.QuerierService/LabelNames'\n"
+            "window = json.dumps({'start': int(time.time() - 3600) * 1000, 'end': int(time.time()) * 1000}).encode()\n"
             "result = {\n"
-            " 'no_tenant': [get('http://mimir:8080/prometheus/api/v1/labels')[0], get('http://loki:3100/loki/api/v1/labels')[0],\n"
-            "               get('http://tempo:3200/api/search')[0]],\n"
+            " 'no_tenant': {'mimir': get('http://mimir:8080/prometheus/api/v1/labels')[0],\n"
+            "               'loki': get('http://loki:3100/loki/api/v1/labels')[0],\n"
+            "               'tempo': get('http://tempo:3200/api/search')[0],\n"
+            "               'pyroscope': get(profiles, body=window)[0]},\n"
+            " 'with_tenant': {'pyroscope': get(profiles, 'acme-web', window)[0]},\n"
             " 'mimir': get('http://mimir:8080/runtime_config')[1],\n"
             " 'pyroscope': get('http://pyroscope:4040/runtime_config')[1],\n"
-            " 'tempo': get('http://tempo:3200/status/overrides/globex-edge')[1],\n"
-            " 'loki': get('http://loki:3100/loki/api/v1/drilldown-limits', 'acme-batch')[1],\n"
+            f" 'tempo': {{tenant: get('http://tempo:3200/status/overrides/' + tenant)[1] for tenant in {tenants!r}}},\n"
             "}\n"
             "print(json.dumps(result))\n"
         )
         result = json.loads(output.strip().splitlines()[-1])
-        self.assertEqual(result["no_tenant"], [401, 401, 401])
+        # Addressed directly without a tenant, every backend refuses; with one, Pyroscope answers.
+        self.assertEqual(result["no_tenant"], {"mimir": 401, "loki": 401, "tempo": 401, "pyroscope": 401})
+        self.assertEqual(result["with_tenant"], {"pyroscope": 200})
         mimir = yaml.safe_load(result["mimir"])["overrides"]
-        self.assertEqual(sorted(mimir), ["acme-batch", "acme-web", "globex-edge", "globex-web"])
-        self.assertEqual(mimir["globex-web"]["compactor_blocks_retention_period"], "4d")
-        self.assertEqual(mimir["acme-web"]["ingestion_rate"], 10000)
         pyroscope = yaml.safe_load(result["pyroscope"])["overrides"]
-        self.assertEqual(sorted(pyroscope), ["acme-web", "globex-edge", "globex-web"])
-        self.assertIn("block_retention: 2d", result["tempo"])
-        self.assertIn("burst_size_bytes: 1048576", result["tempo"])
-        self.__class__.loki_limits = result["loki"]
+        with_signal = lambda signal: sorted(stream.backend_id for stream in platform.streams if signal in stream.signals)
+        self.assertEqual(sorted(mimir), with_signal("metrics"))
+        self.assertEqual(sorted(pyroscope), with_signal("profiles"))
+        # Every pair's own retention, per signal, as each backend loaded it. Loki has no endpoint
+        # that reports loaded overrides, so its value is not observable here.
+        checked = 0
+        for stream in platform.streams:
+            wanted = {signal: policy.retention_hours for signal, policy in stream.signals.items()}
+            with self.subTest(pair=stream.backend_id):
+                if "metrics" in wanted:
+                    self.assertEqual(hours(mimir[stream.backend_id]["compactor_blocks_retention_period"]), wanted["metrics"])
+                    checked += 1
+                if "profiles" in wanted:
+                    self.assertEqual(hours(pyroscope[stream.backend_id]["retention_period"]), wanted["profiles"])
+                    checked += 1
+                if "traces" in wanted:
+                    (reported,) = re.findall(r"block_retention:\s*(\S+)", result["tempo"][stream.backend_id])
+                    self.assertEqual(hours(reported), wanted["traces"])
+                    checked += 1
+        self.assertEqual(checked, 4 + 3 + 3)
+        # acme/web declares a different retention for each signal, and each backend has its own.
+        web = {signal: policy.retention_hours for signal, policy in platform.streams[1].signals.items()}
+        self.assertEqual(platform.streams[1].backend_id, "acme-web")
+        self.assertEqual(len(set(web.values())), 4)
+        self.assertEqual(mimir["acme-web"]["ingestion_rate"], 10000)
+        self.assertIn("burst_size_bytes: 1048576", result["tempo"]["globex-edge"])
 
     def test_10_only_the_gateway_is_published_and_on_loopback(self) -> None:
         output = compose("ps", "--format", "json").stdout
@@ -391,6 +540,8 @@ class StackTests(unittest.TestCase):
             headers={"X-Grafana-Org-Id": str(organizations["acme"])},
             params={"query": f'{{service_name="{fixtures.SERVICE}"}} |= "{self.run_id}"'},
         )
+        if status != 200:
+            body += "\n--- grafana log ---\n" + compose("logs", "--tail", "60", "grafana", check=False).stdout[-6000:]
         self.assertEqual(status, 200, body)
         self.assertIn(self.run_id, body)
         # The other organization does not have that data source.
@@ -405,6 +556,49 @@ class StackTests(unittest.TestCase):
         self.assertNotEqual(status, 200)
         second = compose("run", "--rm", "--no-deps", "grafana-init").stdout
         self.assertEqual(second.strip().splitlines()[-1], "no changes")
+
+    def test_11b_every_correlation_targets_a_data_source_of_the_same_organization(self) -> None:
+        platform = load_platform(CONFIG)
+        ui = platform.grafana.hostname
+        admin = secret(platform.grafana.admin_secret_ref)
+        organizations = {
+            item["name"]: item["id"]
+            for item in json.loads(call("/api/orgs", host=ui, user="admin", password=admin)[1])
+        }
+
+        def targets(value: object) -> list[str]:
+            if isinstance(value, dict):
+                return [item for key, child in value.items() for item in (
+                    [child] if key == "datasourceUid" else targets(child)
+                )]
+            if isinstance(value, list):
+                return [item for child in value for item in targets(child)]
+            return []
+
+        links = 0
+        for tenant in ("acme", "globex"):
+            header = {"X-Grafana-Org-Id": str(organizations[tenant])}
+            status, body = call("/api/datasources", host=ui, user="admin", password=admin, headers=header)
+            self.assertEqual(status, 200, body)
+            sources = json.loads(body)
+            own = {source["uid"] for source in sources}
+            for source in sources:
+                # The list omits nothing we need, but read each one as Grafana stores it.
+                status, body = call(f"/api/datasources/uid/{source['uid']}", host=ui, user="admin", password=admin, headers=header)
+                self.assertEqual(status, 200, body)
+                for target in targets(json.loads(body).get("jsonData") or {}):
+                    with self.subTest(tenant=tenant, source=source["name"], target=target):
+                        self.assertIn(target, own)
+                        links += 1
+        # acme/web and both globex streams: metrics->traces 1, logs->traces 1, traces->logs, metrics x2, profiles = 6 each.
+        # acme/batch has metrics and logs only, so it has no trace links.
+        self.assertEqual(links, 3 * 6)
+        # A link never crosses datastreams: the trace link of acme/web logs is acme/web traces.
+        status, body = call(
+            f"/api/datasources/uid/{datasource_uid('acme-web', 'logs')}", host=ui, user="admin", password=admin,
+            headers={"X-Grafana-Org-Id": str(organizations["acme"])},
+        )
+        self.assertEqual(json.loads(body)["jsonData"]["derivedFields"][0]["datasourceUid"], datasource_uid("acme-web", "traces"))
 
     # ---- changes and restarts (last: they disturb the stack) ----------------------------
 
@@ -438,6 +632,122 @@ class StackTests(unittest.TestCase):
         self.assertEqual(len(eventually(self.metrics, timeout=180)), 1)
         self.assertIn("fixture-parent", eventually(self.trace, timeout=180))
         self.assertIn("fixture_work", eventually(lambda: self.profile().get("flamegraph", {}).get("names", []), timeout=180))
+
+    def test_14_each_backend_keeps_its_data_across_its_own_restart(self) -> None:
+        def tolerant(check):
+            # While a backend restarts, the query helpers assert on its error replies; that is "not yet".
+            def attempt() -> bool:
+                try:
+                    return bool(check())
+                except AssertionError:
+                    return False
+            return attempt
+
+        checks = {
+            "mimir": tolerant(lambda: len(self.metrics()) == 1),
+            "tempo": tolerant(lambda: "fixture-parent" in self.trace()),
+            "pyroscope": tolerant(lambda: "fixture_work" in self.profile().get("flamegraph", {}).get("names", [])),
+        }
+        for backend, check in checks.items():
+            with self.subTest(backend=backend):
+                self.assertTrue(eventually(check, timeout=180), "fixture missing before the restart")
+                compose("restart", backend)
+                self.assertTrue(eventually(check, timeout=240), "fixture missing after the restart")
+
+    # ---- credential rotation, as the runbook in docs/05-gateway.md describes it ----------
+
+    def grafana_query(self) -> int:
+        """A Loki query through Grafana's acme/web data source: Grafana -> gateway -> Loki."""
+        platform = load_platform(CONFIG)
+        ui, admin = platform.grafana.hostname, secret(platform.grafana.admin_secret_ref)
+        organizations = {item["name"]: item["id"] for item in json.loads(call("/api/orgs", host=ui, user="admin", password=admin)[1])}
+        status, _ = call(
+            f"/api/datasources/proxy/uid/{datasource_uid('acme-web', 'logs')}/loki/api/v1/labels", host=ui,
+            user="admin", password=admin, headers={"X-Grafana-Org-Id": str(organizations["acme"])},
+        )
+        return status
+
+    def datasource_user(self) -> str:
+        platform = load_platform(CONFIG)
+        ui, admin = platform.grafana.hostname, secret(platform.grafana.admin_secret_ref)
+        organizations = {item["name"]: item["id"] for item in json.loads(call("/api/orgs", host=ui, user="admin", password=admin)[1])}
+        _, body = call(
+            f"/api/datasources/uid/{datasource_uid('acme-web', 'logs')}", host=ui, user="admin", password=admin,
+            headers={"X-Grafana-Org-Id": str(organizations["acme"])},
+        )
+        return json.loads(body)["basicAuthUser"]
+
+    def declare(self, credential_id: str, permission: str) -> None:
+        document = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
+        document["secrets"][credential_id] = {"path": "nighthawk/e2e", "key": credential_id}
+        document["credentials"].append({
+            "id": credential_id, "secret_ref": credential_id, "tenant": "acme", "datastream": "web",
+            "permission": permission,
+        })
+        CONFIG.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+    def retire(self, credential_id: str) -> None:
+        document = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
+        document["credentials"] = [item for item in document["credentials"] if item["id"] != credential_id]
+        del document["secrets"][credential_id]
+        CONFIG.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+    def test_15_ingestion_credential_rotates_without_a_gap(self) -> None:
+        self.declare("acme-web-ingest-2", "ingest")
+        # Two ingestion credentials and no choice: refused before anything changes.
+        with self.assertRaisesRegex(Exception, "several ingestion credentials qualify"):
+            bring_up()
+        self.assertEqual(push_log("acme-web-ingest", "before-switch"), 204)
+        bring_up("acme-web-ingest-2")
+        collector = (WORK / "rendered" / "collector" / "datastream.alloy").read_text(encoding="utf-8")
+        self.assertIn("credential acme-web-ingest-2", collector)
+        # Both are accepted during the overlap.
+        self.assertEqual(eventually(lambda: push_log("acme-web-ingest-2", "overlap-new") == 204 and 204, timeout=30), 204)
+        self.assertEqual(push_log("acme-web-ingest", "overlap-old"), 204)
+        # The collector delivers with the new credential.
+        run = f"rot{self.run_id}"
+        emit("acme", "web", run)
+        self.assertEqual(len(eventually(lambda: query_logs("acme-web-query", f"fixture {run}")[1], timeout=120)), 4)
+        retired_secret = secret("acme-web-ingest")
+        self.retire("acme-web-ingest")
+        bring_up()
+        retired = lambda: push_log(None, "retired", user="acme-web-ingest", password=retired_secret)
+        self.assertEqual(eventually(lambda: retired() == 401 and 401, timeout=30), 401)
+        self.assertEqual(push_log("acme-web-ingest-2", "after-retire"), 204)
+        run = f"rtd{self.run_id}"
+        emit("acme", "web", run)
+        self.assertEqual(len(eventually(lambda: query_logs("acme-web-query", f"fixture {run}")[1], timeout=120)), 4)
+
+    def test_16_query_credential_rotates_without_a_gap_and_in_place(self) -> None:
+        self.assertEqual(self.grafana_query(), 200)
+        self.declare("acme-web-query-2", "query")
+        with self.assertRaisesRegex(Exception, "several query credentials are declared"):
+            bring_up()
+        self.assertEqual(self.grafana_query(), 200)
+        bring_up("acme-web-query-2")
+        self.assertEqual(self.datasource_user(), "acme-web-query-2")
+        self.assertEqual(self.grafana_query(), 200)
+        self.assertEqual(call("/logs/loki/api/v1/labels", "acme-web-query")[0], 200)
+        retired_secret = secret("acme-web-query")
+        self.retire("acme-web-query")
+        bring_up()
+        self.assertEqual(self.grafana_query(), 200)
+        self.assertEqual(self.datasource_user(), "acme-web-query-2")
+        # The retired credential's real secret is refused, not merely a wrong one.
+        retired = lambda: call("/logs/loki/api/v1/labels", user="acme-web-query", password=retired_secret)[0]
+        self.assertEqual(eventually(lambda: retired() == 401 and 401, timeout=30), 401)
+        # In place: a new value under the same credential. Grafana must be sent the new password.
+        old = secret("acme-web-query-2")
+        platform = load_platform(CONFIG)
+        new = "rotated-in-place-" + hashlib.sha256(self.run_id.encode()).hexdigest()
+        secrets.rotate_secret(vault.connect(platform), platform, "acme-web-query-2", new)
+        bring_up()
+        self.assertEqual(secret("acme-web-query-2"), new)
+        self.assertEqual(eventually(lambda: self.grafana_query() == 200 and 200, timeout=60), 200)
+        self.assertEqual(call("/logs/loki/api/v1/labels", user="acme-web-query-2", password=old)[0], 401)
+        # And an unchanged re-run does not touch Grafana again.
+        again = compose("run", "--rm", "--no-deps", "grafana-init").stdout
+        self.assertEqual(again.strip().splitlines()[-1], "no changes")
 
 
 if __name__ == "__main__":

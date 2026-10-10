@@ -4,25 +4,24 @@ import copy
 import hashlib
 import http.server
 import io
-import tarfile
 import tempfile
 import threading
 import unittest
+import zipfile
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
+from nighthawk.__main__ import main
 from nighthawk.config import ConfigurationError, load_versions
-from nighthawk.tools import fetch_tools, wait_http
+from nighthawk.tools import TERRAFORM_URL, fetch_tools, wait_http
 
 
-def age_archive() -> bytes:
+def terraform_archive(names: tuple[str, ...] = ("terraform", "LICENSE.txt")) -> bytes:
     buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
-        for name in ("age/age", "age/age-keygen", "age/LICENSE"):
-            content = f"binary {name}".encode()
-            info = tarfile.TarInfo(name)
-            info.size = len(content)
-            archive.addfile(info, io.BytesIO(content))
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name in names:
+            archive.writestr(name, f"content of {name}")
     return buffer.getvalue()
 
 
@@ -31,10 +30,9 @@ class FetchToolsTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.tools = Path(self.temp.name) / "tools"
-        self.downloads = {"sops": b"fake sops binary", "age": age_archive()}
+        self.archive = terraform_archive()
         self.matrix = copy.deepcopy(load_versions())
-        for tool, content in self.downloads.items():
-            self.matrix["secrets_tools"][tool]["sha256"] = {"linux_amd64": hashlib.sha256(content).hexdigest()}
+        self.matrix["validation_tools"]["terraform"]["sha256"] = {"linux_amd64": hashlib.sha256(self.archive).hexdigest()}
         patcher = mock.patch("nighthawk.tools.platform_key", return_value=("linux", "amd64"))
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -42,36 +40,53 @@ class FetchToolsTests(unittest.TestCase):
 
     def download(self, url: str) -> bytes:
         self.requested.append(url)
-        return self.downloads["sops" if "/sops/" in url else "age"]
+        return self.archive
 
-    def test_matching_downloads_are_installed_executable(self) -> None:
-        self.assertEqual(fetch_tools(self.matrix, self.tools, self.download), ["sops", "age"])
-        self.assertEqual(sorted(path.name for path in self.tools.iterdir()), ["age", "age-keygen", "sops"])
-        for path in self.tools.iterdir():
-            self.assertEqual(path.stat().st_mode & 0o777, 0o755)
-        self.assertEqual((self.tools / "age-keygen").read_bytes(), b"binary age/age-keygen")
-        self.assertIn("sops-v3.13.3.linux.amd64", self.requested[0])
-        self.assertIn("age-v1.3.2-linux-amd64.tar.gz", self.requested[1])
-        # Present tools are not downloaded again.
-        self.requested.clear()
+    def test_verified_download_is_installed_executable(self) -> None:
+        self.assertEqual(fetch_tools(self.matrix, self.tools, self.download), ["terraform"])
+        version = self.matrix["validation_tools"]["terraform"]["version"]
+        self.assertEqual(self.requested, [TERRAFORM_URL.format(version=version, system="linux", arch="amd64")])
+        self.assertEqual((self.tools / "terraform").read_text(), "content of terraform")
+        self.assertEqual((self.tools / "terraform").stat().st_mode & 0o777, 0o755)
+        self.assertEqual(sorted(path.name for path in self.tools.iterdir()), ["terraform"])
+        # Present already: nothing is downloaded again.
         self.assertEqual(fetch_tools(self.matrix, self.tools, self.download), [])
-        self.assertEqual(self.requested, [])
+        self.assertEqual(len(self.requested), 1)
 
-    def test_checksum_mismatch_is_discarded_and_names_the_tool(self) -> None:
-        self.downloads["sops"] = b"tampered"
-        with self.assertRaisesRegex(ConfigurationError, "^sops: download checksum"):
+    def test_checksum_mismatch_installs_nothing_and_names_terraform(self) -> None:
+        self.archive = terraform_archive(("terraform", "tampered"))
+        with self.assertRaisesRegex(ConfigurationError, "terraform: download checksum .* does not match the pinned"):
             fetch_tools(self.matrix, self.tools, self.download)
         self.assertFalse(self.tools.exists())
-        self.downloads["sops"] = b"fake sops binary"
-        self.downloads["age"] = b"tampered"
-        with self.assertRaisesRegex(ConfigurationError, "^age: download checksum"):
-            fetch_tools(self.matrix, self.tools, self.download)
-        self.assertEqual([path.name for path in self.tools.iterdir()], ["sops"])
 
-    def test_platform_without_a_checksum_fails(self) -> None:
-        with mock.patch("nighthawk.tools.platform_key", return_value=("linux", "riscv64")):
-            with self.assertRaisesRegex(ConfigurationError, "no checksum for linux_riscv64"):
-                fetch_tools(self.matrix, self.tools, self.download)
+    def test_platform_without_a_checksum_fails_before_downloading(self) -> None:
+        self.matrix["validation_tools"]["terraform"]["sha256"] = {"linux_arm64": "0" * 64}
+        with self.assertRaisesRegex(ConfigurationError, "no checksum for linux_amd64"):
+            fetch_tools(self.matrix, self.tools, self.download)
+        self.assertEqual(self.requested, [])
+
+    def test_verified_archive_without_the_executable_installs_nothing(self) -> None:
+        self.archive = terraform_archive(("README",))
+        self.matrix["validation_tools"]["terraform"]["sha256"] = {"linux_amd64": hashlib.sha256(self.archive).hexdigest()}
+        with self.assertRaisesRegex(ConfigurationError, "holds no terraform executable"):
+            fetch_tools(self.matrix, self.tools, self.download)
+        self.assertFalse(self.tools.exists())
+
+    def test_the_real_matrix_has_a_checksum_for_each_supported_linux_build(self) -> None:
+        checksums = load_versions()["validation_tools"]["terraform"]["sha256"]
+        for build in ("linux_amd64", "linux_arm64"):
+            self.assertRegex(checksums[build], r"^[0-9a-f]{64}$")
+
+    def test_command_line_reports_what_it_installed(self) -> None:
+        output = io.StringIO()
+        with mock.patch("nighthawk.tools.fetch_tools", return_value=["terraform"]) as fetched, redirect_stdout(output):
+            self.assertEqual(main(["fetch-tools", "--tools-dir", str(self.tools)]), 0)
+        self.assertEqual(fetched.call_args.args[1], self.tools)
+        self.assertIn(f"Installed terraform into {self.tools}", output.getvalue())
+        errors = io.StringIO()
+        with mock.patch("nighthawk.tools.fetch_tools", side_effect=ConfigurationError("terraform: boom")), redirect_stderr(errors):
+            self.assertEqual(main(["fetch-tools", "--tools-dir", str(self.tools)]), 1)
+        self.assertIn("error: terraform: boom", errors.getvalue())
 
 
 class WaitHttpTests(unittest.TestCase):

@@ -10,9 +10,12 @@ from pathlib import Path
 from nighthawk.authz import AuthService, RequestFacts, decide, load_policy, make_server, parse_policy
 from nighthawk.config import ConfigurationError, load_platform
 from nighthawk.gateway import policy_bundle, write_policy_bundle
-from nighthawk.trust import init_ca, issue_certificate
+from nighthawk.secrets import materialized_path
+from nighthawk.trust import issue_certificate
+from nighthawk.vault import pki_roles
 from tests.fakes import (
-    add_stream, basic, fake_sops, forwarded_certificate, four_stream_document, materialize_plain, write_document,
+    FakeVault, add_stream, basic, fake_client, forwarded_certificate, four_stream_document, materialize_plain,
+    write_document,
 )
 
 
@@ -46,10 +49,12 @@ class PolicyFixture(unittest.TestCase):
         return RequestFacts(**values)
 
     def certificate(self, credential: str, name: str) -> str:
-        if not (self.root / "secrets").exists():
-            init_ca(self.platform, ["age1recipient"], 30, root=self.root, runner=fake_sops)
+        if not hasattr(self, "vault"):
+            self.vault = FakeVault(self.platform)
+        # As an operator re-applies the rendered roles after declaring another collector identity.
+        self.vault.roles = pki_roles(self.platform)
         issued = issue_certificate(
-            self.platform, self.root / name, 7, credential_id=credential, root=self.root, runner=fake_sops,
+            self.platform, self.root / name, 7, fake_client(self.platform, self.vault), credential_id=credential,
         )
         return forwarded_certificate(issued.certificate_path)
 
@@ -165,13 +170,13 @@ class PolicyBundleTests(PolicyFixture):
         self.assertIn("example-query", str(raised.exception))
         self.assertNotIn("short-secret", str(raised.exception))
         reference = self.platform.secrets["example-ingest"]
-        (directory / reference.file / reference.key).unlink()
-        (directory / reference.file / "example-query").write_text("q" * 40, encoding="utf-8")
+        materialized_path(directory, reference).unlink()
+        materialized_path(directory, self.platform.secrets["example-query"]).write_text("q" * 40, encoding="utf-8")
         with self.assertRaisesRegex(ConfigurationError, "example-ingest"):
             policy_bundle(self.platform, directory)
 
     def test_removed_credential_leaves_the_bundle(self) -> None:
-        self.data["secrets"]["example-ingest-next"] = {"file": "secrets/local.sops.yaml", "key": "example-ingest-next"}
+        self.data["secrets"]["example-ingest-next"] = {"path": "nighthawk/local", "key": "example-ingest-next"}
         self.data["credentials"].append({
             "id": "example-ingest-next", "secret_ref": "example-ingest-next",
             "tenant": "example", "datastream": "application", "permission": "ingest",

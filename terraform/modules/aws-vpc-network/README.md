@@ -24,7 +24,15 @@ directly. It does not install EKS, Helm, or any Kubernetes resource; see the
   Gateway Endpoint for S3 plus a per-source security-group egress rule
   scoped to that endpoint's prefix list - not a public `0.0.0.0/0:443` rule -
   matching the network contract's own purpose text ("S3 via private service
-  connectivity").
+  connectivity"). Rules are created in the direction the contract declares;
+  today that is egress only.
+- The security groups do nothing until they are attached. The
+  [`aws-eks` module](../aws-eks/README.md) attaches them to every node through
+  its `node_security_group_ids` input, which the root wires from this
+  module's `security_group_ids` output.
+- Public subnets are tagged `kubernetes.io/role/elb = 1` and private subnets
+  `kubernetes.io/role/internal-elb = 1`, the tags a load balancer integration
+  uses to find subnets.
 
 ## Outputs
 
@@ -49,6 +57,7 @@ terraform test
 ```
 
 Expected results: valid configuration and three passing plan-only mocked
-runs. Tests cover the real `aws-object-storage` network-contract rule, a
-rejected `loopback`-scope rule, and a rejected unsupported destination. They
-do not contact AWS or prove deployment compatibility.
+runs. Tests cover the real `aws-object-storage` network-contract rule with its
+protocol and port, the subnet role tags, a rejected `loopback`-scope rule, and
+a rejected unsupported destination. They do not contact AWS or prove
+deployment compatibility.
